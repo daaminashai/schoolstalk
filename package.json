@@ -1,0 +1,19 @@
+{
+  "name": "schoolyank",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@clack/core": "^1.2.0",
+    "@clack/prompts": "^1.2.0",
+    "browser-use-sdk": "^3.4.3",
+    "openai": "^6.34.0",
+    "picocolors": "^1.1.1"
+  }
+}
