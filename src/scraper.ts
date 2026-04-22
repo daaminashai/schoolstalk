@@ -40,19 +40,6 @@ const EXCLUSIONS = [
 const SiteInfoSchema = z.object({
   siteType: z.enum(["district", "school"]),
   name: z.string().nullable(),
-  address: z.string().nullable(),
-  schools: z.array(z.string()).default([]),
-  // optional: umbrella → members map for shared-campus groupings. lets the
-  // matcher fall back to the federal umbrella record when a specific member
-  // school isn't registered separately in NCES.
-  schoolGroups: z
-    .array(
-      z.object({
-        umbrella: z.string(),
-        members: z.array(z.string()),
-      }),
-    )
-    .default([]),
 });
 
 const TeacherSchema = z.object({
@@ -60,8 +47,6 @@ const TeacherSchema = z.object({
   email: z.string().nullable(),
   role: z.string().nullable(),
   department: z.string().nullable(),
-  phone: z.string().nullable(),
-  assignedSchool: z.string().nullable(),
 });
 
 const TeachersSchema = z.object({
@@ -83,21 +68,13 @@ Before extracting: after the page loads, check the final URL in the address bar.
 
 Use the OFFICIAL, FULL name as it appears in the footer, "Contact Us" page, or "About" page. Do NOT use shorthand from the navigation bar.
 
-━━ ADDRESS ━━
-
-Full MAILING address: street, city, state, zip. Usually in the footer.
-Return the SCHOOL's street address.
-
 ━━ OUTPUT ━━
 
 Return your answer as structured JSON matching the required schema:
 - siteType: "school" (always)
-- name: the official full name (null only if you genuinely cannot find one)
-- address: full mailing address (null only if unavailable)
-- schools: []
-- schoolGroups: []
+ - name: the official full name (null only if you genuinely cannot find one)
 
-Do NOT save output to a file. Do NOT use save_output_json. Return the JSON data as your final response via the structured output format.`;
+  Do NOT save output to a file. Do NOT use save_output_json. Return the JSON data as your final response via the structured output format.`;
 }
 
 // (no umbrella prompt in single-school mode)
@@ -145,8 +122,7 @@ function promptExtractTeachers(): string {
 - email: exact email address — mailto: links, on-page text, contact sections. Normalize obfuscated forms ("a [at] b [dot] edu" → "a@b.edu"). If no email is visible anywhere, set null — never guess. **Returning teachers with email=null is always better than returning an empty teacher array** — downstream validation infers emails from the district's naming pattern when ≥3 real emails are seen, but it needs SOME teachers to work with. Never skip extracting a teacher just because their email isn't visible.
 - role: their job title as written ("AP Physics Teacher", "Math Department Chair"). What they DO.
 - department: SUBJECT only — e.g. "Science", "Mathematics", "Computer Science", "Engineering", "Technology". NEVER a school name. NEVER a grade level. Infer from role if the site doesn't name a department.
-- phone: extension if listed next to the teacher. Don't invent.
-- assignedSchool: null (single-school only)
+ - department: SUBJECT only — e.g. "Science", "Mathematics", "Computer Science", "Engineering", "Technology". NEVER a school name. NEVER a grade level. Infer from role if the site doesn't name a department.
 
 ━━ CRITICAL ANTI-PATTERNS ━━
 
@@ -268,9 +244,6 @@ export async function scrapeSchool(
     const siteInfo: RawSiteInfo = {
       siteType: "school",
       name: rawSite.name,
-      address: rawSite.address,
-      schools: [],
-      schoolGroups: [],
     };
 
     // milestone fires RIGHT NOW, not after all 3 tasks finish. previously the
@@ -316,8 +289,6 @@ export async function scrapeSchool(
       ...(t.email != null && { email: t.email }),
       ...(t.role != null && { role: t.role }),
       ...(t.department != null && { department: t.department }),
-      ...(t.phone != null && { phone: t.phone }),
-      ...(t.assignedSchool != null && { assignedSchool: t.assignedSchool }),
     }));
 
     milestone(

@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { ScrapeResult, SchoolInfo, Teacher } from "./types";
+import type { ScrapeResult, Teacher } from "./types";
 
 const HEADERS = [
   "first_name",
@@ -8,13 +8,6 @@ const HEADERS = [
   "email",
   "role",
   "department",
-  "school_name",
-  "school_address",
-  "school_city",
-  "school_state",
-  "school_zip",
-  "school_phone",
-  "school_district",
   "source_url",
   "data_sources",
 ] as const;
@@ -26,60 +19,9 @@ function escapeField(value: string): string {
   return value;
 }
 
-/** resolve the SchoolInfo for a given teacher with layered fallbacks */
-function schoolForTeacher(teacher: Teacher, result: ScrapeResult): SchoolInfo | null {
-  // 1. composite match (name + ncesId) — most specific. handles the case where
-  //    multiple synthetic schools share one umbrella ncesId (e.g. both
-  //    "Allen Brook School" and "Williston Central School" inherit the federal
-  //    "Williston Schools" ncesId).
-  if (teacher.schoolName && teacher.schoolNcesId) {
-    const lower = teacher.schoolName.toLowerCase();
-    const composite = result.schools.find(
-      (s) => s.ncesId === teacher.schoolNcesId && s.name.toLowerCase() === lower,
-    );
-    if (composite) return composite;
-  }
-  // 2. name match — keeps the teacher's site-level display name as authoritative
-  if (teacher.schoolName) {
-    const lower = teacher.schoolName.toLowerCase();
-    const byName = result.schools.find((s) => s.name.toLowerCase() === lower);
-    if (byName) return byName;
-  }
-  // 3. ncesId match — last resort, may pick an arbitrary synthetic sibling
-  if (teacher.schoolNcesId) {
-    const byId = result.schools.find((s) => s.ncesId === teacher.schoolNcesId);
-    if (byId) return byId;
-  }
-  // no match: in single-school mode, return the only school; in district mode
-  // return null so the caller can substitute district-office data.
-  if (!result.district && result.schools.length === 1) return result.schools[0]!;
-  return null;
-}
-
 function teacherToRow(teacher: Teacher, result: ScrapeResult): string {
-  const school = schoolForTeacher(teacher, result);
-  const district = result.district;
-
-  // pick address: teacher's resolved school > district office > empty
-  const addr = school?.address ?? district?.officeAddress ?? null;
-
-  // school_name column: the teacher's specific school when known, otherwise
-  // whatever label makes sense in the current mode.
-  const schoolName =
-    school?.name ?? teacher.schoolName ?? (district ? "" : result.schools[0]?.name ?? "");
-
-  // school_phone: teacher's school phone > district office phone > empty
-  const schoolPhone = school?.phone ?? district?.officePhone ?? "";
-
-  // school_district column: prefer the top-level district, else the school's
-  // nces-provided lea_name.
-  const districtName = district?.name ?? school?.district ?? "";
-
-  // source_url: where the teacher's data was scraped from. in district mode
-  // that's the district site (everyone shares the same directory root); in
-  // single-school mode it's the school's site. both are tracked as schoolUrl
-  // in the scrape config and stored on district/school records.
-  const sourceUrl = district?.url ?? school?.url ?? result.schools[0]?.url ?? "";
+  // source_url: where the teacher's data was scraped from.
+  const sourceUrl = result.sourceUrl;
 
   const fields: string[] = [
     teacher.firstName,
@@ -87,13 +29,6 @@ function teacherToRow(teacher: Teacher, result: ScrapeResult): string {
     teacher.email ?? "",
     teacher.role,
     teacher.department ?? "",
-    schoolName,
-    addr?.street ?? "",
-    addr?.city ?? "",
-    addr?.state ?? "",
-    addr?.zip ?? "",
-    schoolPhone,
-    districtName,
     sourceUrl,
     teacher.sources.join(";"),
   ];

@@ -1,26 +1,8 @@
 // ── orchestrator: coordinates the 4-phase scraping pipeline ──
 
-import type {
-  ScrapeConfig,
-  ScrapeResult,
-  SchoolInfo,
-  DistrictInfo,
-  Address,
-  Teacher,
-  NCESSchoolRecord,
-  RawSiteInfo,
-} from "./types";
+import type { ScrapeConfig, ScrapeResult, Teacher } from "./types";
 import { scrapeSchool } from "./scraper";
-import {
-  districtRecordToAddress,
-  lookupDistrict,
-  lookupSchool,
-  lookupSchoolsInDistrict,
-  matchSchoolInDistrict,
-  ncesRecordToAddress,
-  extractSchoolNameFromUrl,
-} from "./nces";
-import { normalizeDistrictName, normalizeSchoolName } from "./names";
+// NCES and district resolution removed
 import { validateTeachers } from "./validator";
 import { validateEmailsBatched } from "./emailValidator";
 import { generateCsv, writeCsv } from "./csv";
@@ -34,14 +16,12 @@ export type PhaseId =
   | "classify"
   | "directory"
   | "extract"
-  | "nces"
   | "export";
 
 export const PHASE_LABELS: Record<PhaseId, string> = {
   classify: "classifying site",
   directory: "finding staff directory",
   extract: "extracting teachers",
-  nces: "verifying with NCES",
   export: "writing CSV",
 };
 
@@ -76,13 +56,12 @@ export async function run(
   // the classify + directory + extract tasks all run inside scrapeSchool. we
   // still model them as distinct phases so the ui shows meaningful progress
   // while the scraper thinks.
-  const totalPhases = 5;
+  const totalPhases = 4;
   const phaseIndex: Record<PhaseId, number> = {
     classify: 1,
     directory: 2,
     extract: 3,
-    nces: 4,
-    export: 5,
+    export: 4,
   };
 
   function enterPhase(phase: PhaseId) {
@@ -218,55 +197,13 @@ export async function run(
   }
 
   // ── phase 4: nces ──
-  enterPhase("nces");
-  log("verifying school addresses with NCES...");
-  // Single-school mode only
-  const { district, schools } = await resolveSingleSchool(
-    scrapeResult.siteInfo,
-    config.schoolUrl,
-    extractState(scrapeResult.siteInfo.address, config.schoolUrl),
-    log,
-    warnings,
-  );
-  debug("ORCH", `resolveSites · district=${district?.name ?? "(none)"} leaId=${district?.leaId ?? "-"} schools=${schools.length}`, {
-    district,
-    schools: schools.map((s) => ({ name: s.name, ncesId: s.ncesId, city: s.address?.city })),
-  });
-
-  // stamp each teacher with their resolved school (ncesId) when we can match them
-  resolveTeacherSchools(teachers, schools, district, warnings);
-
-  // add nces to sources for any teacher who ended up with an nces-backed school
-  let ncesResolvedCount = 0;
-  for (const t of teachers) {
-    const resolved = findSchoolForTeacher(t, schools);
-    if (resolved?.address?.source === "nces") {
-      ncesResolvedCount++;
-      if (!t.sources.includes("nces")) t.sources.push("nces");
-    }
-  }
-
-  if (district) {
-    milestone(
-      `NCES: matched ${schools.filter((s) => s.ncesId && s.address?.source === "nces").length}/${schools.length} schools to federal records`,
-    );
-  } else if (schools[0]?.address?.source === "nces") {
-    milestone(`NCES: verified school address`);
-  }
-  if (ncesResolvedCount < teachers.length && teachers.length > 0) {
-    const unresolved = teachers.length - ncesResolvedCount;
-    milestone(
-      `${unresolved} teacher${unresolved === 1 ? "" : "s"} fell back to district-office address (no NCES match for their school)`,
-      "warn",
-    );
-  }
+  // NCES/district resolution removed — proceed directly to export
 
   // LinkedIn enrichment removed — keep teachers as-is
 
   // ── assemble the final result ──
   const result: ScrapeResult = {
-    district,
-    schools,
+    sourceUrl: config.schoolUrl,
     teachers,
     metadata: {
       scrapedAt: new Date().toISOString(),
@@ -283,7 +220,7 @@ export async function run(
   const csv = generateCsv(result);
   await writeCsv(config.outputPath, csv);
 
-  debug("ORCH", `run() complete · ${((Date.now() - startTime) / 1000).toFixed(2)}s · ${teachers.length} teachers, ${schools.length} schools, ${warnings.length} warnings`, {
+  debug("ORCH", `run() complete · ${((Date.now() - startTime) / 1000).toFixed(2)}s · ${teachers.length} teachers, ${warnings.length} warnings`, {
     outputPath: config.outputPath,
     warnings,
   });
@@ -306,6 +243,7 @@ export async function run(
  * no district info is produced even when nces reports an lea_name — the distinction
  * here is about the SITE being a district site vs a single school site.
  */
+/*
 async function resolveSingleSchool(
   siteInfo: RawSiteInfo,
   schoolUrl: string,
@@ -401,6 +339,7 @@ async function resolveSingleSchool(
  * the full district roster from nces, wrap every school as SchoolInfo, and
  * produce a DistrictInfo carrying the district office address.
  */
+/*
 async function resolveDistrict(
   siteInfo: RawSiteInfo,
   schoolUrl: string,

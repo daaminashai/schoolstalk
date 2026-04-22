@@ -276,17 +276,8 @@ export function validateTeachers(
       // after we know the majority email domain. placeholder here.
       const emailDomainMatch = false;
 
-      // scrub school names that leaked into the department column — the scraper
-      // on district sites historically stuffed school names here because there
-      // was no assignedSchool field. if department looks like a school name,
-      // move it to assignedSchool (only if that's empty) and null out department.
-      let department: string | null = r.department?.trim() || null;
-      let assignedSchool: string | null = r.assignedSchool?.trim() || null;
-
-      if (department && looksLikeSchoolName(department)) {
-        if (!assignedSchool) assignedSchool = department;
-        department = null;
-      }
+  // scrub obviously misfiled department entries
+  let department: string | null = r.department?.trim() || null;
 
       // canonicalize dept label so "Math" and "Mathematics" don't coexist in
       // the same CSV. runs after the school-name scrub so we don't canonicalize
@@ -301,9 +292,6 @@ export function validateTeachers(
         email,
         role: r.role?.trim() ?? "",
         department,
-        schoolName: assignedSchool,
-        schoolNcesId: null,
-        phoneExtension: r.phone?.trim() || null,
         linkedinUrl: null,
         sources: ["school_website"] as DataSource[],
         // classification disabled: keep neutral defaults
@@ -387,8 +375,7 @@ function scoreTeacher(t: Teacher): number {
   if (t.email) s += 3;
   if (t.role) s += 2;
   if (t.department) s += 1;
-  if (t.schoolName) s += 1;
-  if (t.phoneExtension) s += 1;
+  // school assignment and phone extension removed from scoring
   return s;
 }
 

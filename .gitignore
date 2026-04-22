@@ -3,10 +3,12 @@ node_modules
 
 # output
 out
-schools
 dist
 output/
 *.tgz
+schools
+staff_urls.csv
+schools_with_staff_urls.csv
 
 # code coverage
 coverage

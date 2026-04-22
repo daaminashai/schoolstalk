@@ -72,51 +72,22 @@ function padRight(s: string, w: number): string {
 // ── result rendering ─────────────────────────────────────────────────────────
 
 function renderHeadline(result: ScrapeResult, duration: string): string {
-	const { district, schools, teachers } = result;
-	const name = district?.name ?? schools[0]?.name ?? "(unknown)";
-	const addr = district?.officeAddress ?? schools[0]?.address ?? null;
+    const { teachers } = result;
+    const name = new URL(result.sourceUrl).hostname.replace(/^www\./, "");
 
-	const lines: string[] = [];
-	lines.push(t.bold(name));
+    const lines: string[] = [];
+    lines.push(t.bold(name));
 
   const stats: string[] = [
     `${t.accent(String(teachers.length))} ${t.muted("teachers")}`,
   ];
-	if (district) {
-		stats.push(`${t.accent(String(schools.length))} ${t.muted("schools")}`);
-	}
-	stats.push(`${t.muted(`${duration}s`)}`);
-	lines.push(stats.join(t.muted("  ·  ")));
-
-	if (addr) {
-		lines.push(
-			t.muted(
-				`${addr.street}, ${addr.city}, ${addr.state} ${addr.zip}  (${addr.source})`,
-			),
-		);
-	}
-	return lines.join("\n");
+    stats.push(`${t.muted(`${duration}s`)}`);
+    lines.push(stats.join(t.muted("  ·  ")));
+    return lines.join("\n");
 }
 
 function renderSchoolBreakdown(teachers: Teacher[]): string | null {
-	const counts = new Map<string, number>();
-	for (const t of teachers) {
-		const name = t.schoolName?.trim() || "(unassigned)";
-		counts.set(name, (counts.get(name) ?? 0) + 1);
-	}
-	if (counts.size <= 1) return null;
-
-	const entries = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-	const max = Math.max(...entries.map(([, n]) => n));
-	const nameWidth = Math.min(40, Math.max(...entries.map(([n]) => n.length)));
-
-	const lines = [t.bold("teachers by school")];
-	for (const [name, count] of entries) {
-		lines.push(
-			`  ${padRight(name, nameWidth)}  ${bar(count / max, 14)}  ${t.accent(String(count))}`,
-		);
-	}
-	return lines.join("\n");
+    return null;
 }
 
 function renderQualityBlock(teachers: Teacher[]): string {
@@ -146,9 +117,8 @@ function renderTeacherPreview(teachers: Teacher[], limit = 5): string {
     lines.push(`  ${header}`);
 
 		const meta: string[] = [];
-		if (x.department) meta.push(t.muted(x.department));
-		if (x.schoolName) meta.push(t.muted(x.schoolName));
-		if (meta.length) lines.push(`    ${meta.join(t.muted(" · "))}`);
+        if (x.department) meta.push(t.muted(x.department));
+        if (meta.length) lines.push(`    ${meta.join(t.muted(" · "))}`);
 
     if (x.email) lines.push(`    ${t.brand(x.email)}`);
     // no confidence/linkedin classification displayed
@@ -555,7 +525,6 @@ async function runInteractive(): Promise<void> {
       .replace(/^extracting teachers\.{0,3}\s*/i, "")
       .replace(/^finding staff directory\.{0,3}\s*/i, "")
       .replace(/^classifying site.*?\.{0,3}\s*/i, "")
-      .replace(/^verifying.*?NCES\.{0,3}\s*/i, "")
       .replace(/^writing CSV\.{0,3}\s*/i, "")
       .trim();
   }
@@ -613,11 +582,7 @@ async function runInteractive(): Promise<void> {
 		const summary: string[] = [];
 		summary.push(renderHeadline(result, duration));
 
-		const breakdown = renderSchoolBreakdown(teachers);
-		if (breakdown) {
-			summary.push("");
-			summary.push(breakdown);
-		}
+    // school breakdown removed
 
 		if (teachers.length > 0) {
 			summary.push("");

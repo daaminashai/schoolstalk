@@ -6,12 +6,6 @@ export interface Teacher {
   email: string | null;
   role: string;
   department: string | null;
-  // the specific school this teacher is assigned to. in single-school mode this
-  // matches the top-level school; in district mode it's the feeder school
-  // (williston central, hinesburg community, etc.).
-  schoolName: string | null;
-  schoolNcesId: string | null;
-  phoneExtension: string | null;
   linkedinUrl: string | null;
   sources: DataSource[];
   confidence: ConfidenceScore;
@@ -23,6 +17,15 @@ export interface Teacher {
 
 export type HackerScore = 1 | 2 | 3 | 4 | 5;
 
+// Legacy stubs retained for compile compatibility (not used at runtime)
+export interface Address {
+  street: string;
+  city: string;
+  state: string;
+  zip: string;
+  source: "nces" | "school_website" | "inferred";
+}
+
 export interface SchoolInfo {
   name: string;
   url: string;
@@ -32,22 +35,12 @@ export interface SchoolInfo {
   ncesId: string | null;
 }
 
-// district-level info — populated when the scraped url is a district site
-// covering multiple schools rather than a single school.
 export interface DistrictInfo {
   name: string;
   leaId: string | null;
   url: string;
   officeAddress: Address | null;
   officePhone: string | null;
-}
-
-export interface Address {
-  street: string;
-  city: string;
-  state: string;
-  zip: string;
-  source: "nces" | "school_website" | "inferred";
 }
 
 export type DataSource =
@@ -60,10 +53,7 @@ export type DataSource =
 export type ConfidenceScore = 1 | 2 | 3 | 4 | 5;
 
 export interface ScrapeResult {
-  // district is null for single-school scrapes, populated for district sites.
-  district: DistrictInfo | null;
-  // always non-empty: one school for single-school mode, multiple for districts.
-  schools: SchoolInfo[];
+  sourceUrl: string; // canonical URL scraped for this result
   teachers: Teacher[];
   metadata: {
     scrapedAt: string;
@@ -80,32 +70,20 @@ export interface RawTeacherData {
   email?: string;
   role?: string;
   department?: string;
-  phone?: string;
-  // the specific school this teacher works at, when the site covers multiple
-  // schools (typical for district sites). left empty for single-school sites.
-  assignedSchool?: string;
 }
 
 // raw shape for district/school site info returned by the scraper ai pass
 export interface RawSiteInfo {
   siteType: "district" | "school";
-  // the primary name: district name when siteType is district, school name otherwise.
+  // the primary name.
   name: string | null;
-  // primary mailing address: district office in district mode, school in school mode.
-  address: string | null;
-  // list of feeder schools when siteType is district; ignored for school mode.
+  // optional legacy fields — present in older flows, ignored in current runtime
+  address?: string | null;
   schools?: string[];
-  // when a shared campus hosts multiple schools under one umbrella name (e.g.
-  // "Williston Schools" = "Williston Central School" + "Allen Brook School"),
-  // record the grouping. the federal NCES data often lists only the umbrella,
-  // so we use these mappings as a matcher fallback when a specific school
-  // can't be found directly in the NCES roster.
   schoolGroups?: Array<{ umbrella: string; members: string[] }>;
 }
 
-// nces district (LEA) directory endpoint shape (subset). note the district
-// endpoint has different field set than the school endpoint — no ncessch,
-// different location fields, different phone.
+// Legacy NCES type stubs (not used at runtime)
 export interface NCESDistrictRecord {
   lea_name: string;
   leaid: string;
@@ -119,7 +97,6 @@ export interface NCESDistrictRecord {
   phone: string;
 }
 
-// nces api response shape (subset of fields we care about)
 export interface NCESSchoolRecord {
   school_name: string;
   ncessch: string;
