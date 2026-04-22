@@ -3,6 +3,9 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "rank": "bun src/rank.ts"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },

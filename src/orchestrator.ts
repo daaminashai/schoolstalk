@@ -1,6 +1,15 @@
 // ── orchestrator: coordinates the 4-phase scraping pipeline ──
 
-import type { ScrapeConfig, ScrapeResult, Teacher } from "./types";
+import type {
+  ScrapeConfig,
+  ScrapeResult,
+  Teacher,
+  RawSiteInfo,
+  Address,
+  DistrictInfo,
+  SchoolInfo,
+  NCESSchoolRecord,
+} from "./types";
 import { scrapeSchool } from "./scraper";
 // NCES and district resolution removed
 import { validateTeachers } from "./validator";
@@ -8,6 +17,16 @@ import { validateEmailsBatched } from "./emailValidator";
 import { generateCsv, writeCsv } from "./csv";
 import { extractDomain } from "./utils";
 import { debug } from "./debug";
+import {
+  lookupDistrict,
+  lookupSchoolsInDistrict,
+  lookupSchool,
+  districtRecordToAddress,
+  ncesRecordToAddress,
+  matchSchoolInDistrict,
+  extractSchoolNameFromUrl,
+} from "./nces";
+import { normalizeDistrictName, normalizeSchoolName } from "./names";
 
 // ── progress phase model ─────────────────────────────────────────────────────
 // each phase renders as "[i/N] label" in the spinner. only phases that actually
@@ -79,6 +98,7 @@ export async function run(
     onStatus: log,
     onMilestone: milestone,
     onLiveUrl,
+    preferredDirectoryUrls: config.preferredDirectoryUrls,
     onScraperPhase: (phase) => {
       if (phase === "classify") enterPhase("classify");
       else if (phase === "directory") enterPhase("directory");
@@ -105,6 +125,35 @@ export async function run(
   // keep ALL teacher candidates (no STEM filtering). validator handled
   // normalization, email inference, dedup, and scoring.
   let teachers: Teacher[] = candidates;
+
+  // ── NCES: resolve site to district/schools roster (no CSV schema changes) ──
+  const state = extractState(null, config.schoolUrl);
+  try {
+    const { district, schools } = await resolveSites(
+      scrapeResult.siteInfo,
+      config.schoolUrl,
+      state,
+      teachers,
+      log,
+      warnings,
+    );
+    if (district) {
+      milestone(
+        `NCES: matched district ${district.name} · ${schools.length} school${schools.length === 1 ? "" : "s"} in roster`,
+      );
+    } else if (schools.length > 0) {
+      const s0 = schools[0]!;
+      if (s0.ncesId) {
+        milestone(`NCES: verified school ${s0.name} (${s0.ncesId})`);
+      } else {
+        milestone(`NCES: using school website details for ${s0.name} (no NCES match)`, "warn");
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    warnings.push(`NCES resolution failed: ${msg}`);
+    debug("ORCH", `nces resolution failed`, { msg });
+  }
 
   // ── email validation (DNS MX + SMTP RCPT TO, no API keys) ──
   // null out emails that the destination server explicitly rejects (550/551
@@ -236,14 +285,26 @@ export async function run(
  * teacher's assigned school can be matched to a real nces record; in
  * single-school mode we just look up the one school.
  */
-// resolveSites removed — single-school mode only
+// resolveSites: choose single-school vs district path
+async function resolveSites(
+  siteInfo: RawSiteInfo,
+  schoolUrl: string,
+  state: string | null,
+  teachers: Teacher[],
+  log: (msg: string) => void,
+  warnings: string[],
+): Promise<{ district: DistrictInfo | null; schools: SchoolInfo[] }> {
+  if (siteInfo.siteType === "district") {
+    return resolveDistrict(siteInfo, schoolUrl, state, teachers, log, warnings);
+  }
+  return resolveSingleSchool(siteInfo, schoolUrl, state, log, warnings);
+}
 
 /**
  * single-school mode: look up the one school in nces, wrap it as SchoolInfo.
  * no district info is produced even when nces reports an lea_name — the distinction
  * here is about the SITE being a district site vs a single school site.
  */
-/*
 async function resolveSingleSchool(
   siteInfo: RawSiteInfo,
   schoolUrl: string,
@@ -339,7 +400,6 @@ async function resolveSingleSchool(
  * the full district roster from nces, wrap every school as SchoolInfo, and
  * produce a DistrictInfo carrying the district office address.
  */
-/*
 async function resolveDistrict(
   siteInfo: RawSiteInfo,
   schoolUrl: string,

@@ -242,13 +242,13 @@ function printHelp(): void {
     `  ${bin} <url>                  ${t.muted("scrape one school non-interactively")}`,
     `  ${bin} <url1> <url2> ...      ${t.muted("batch (3-way parallel by default)")}`,
     `  ${bin} --urls-file urls.txt   ${t.muted("batch from a file, one url per line")}`,
-    `  ${bin} --schools-csv schools.csv ${t.muted("batch from schools CSV → schools/{STATE}/{city}/{id}.csv")}`,
-    `  ${bin} @schools.csv           ${t.muted("shorthand for --schools-csv schools.csv")}`,
+    `  ${bin} --schools-csv schools_with_staff_urls.csv ${t.muted("batch from unified CSV → schools/{STATE}/{city}/{id}.csv")}`,
+    `  ${bin} @schools_with_staff_urls.csv ${t.muted("shorthand for --schools-csv schools_with_staff_urls.csv")}`,
     "",
     `${t.bold("FLAGS")}`,
     `  ${t.brand("--url")} <x>              add a url (repeatable)`,
     `  ${t.brand("--urls-file")} <path>     read urls from a file (one per line, # for comments)`,
-    `  ${t.brand("--schools-csv")} <path>   read schools from CSV (expects: id, name, state, city, website[_final_url])`,
+    `  ${t.brand("--schools-csv")} <path>   read schools from unified CSV (expects: Hs ID, Name, State, City, School Homepage, Primary URL, Candidate 1..3)`,
     `  ${t.brand("--output, -o")} <path>    single-url output csv path (default: output/<slug>.csv)`,
     `  ${t.brand("--merged-output")} <path> batch merged csv path (default: output/all.csv)`,
     `  ${t.brand("--concurrency, -j")} <n>  parallel workers (higher = faster; risk of rate limits)`,
@@ -265,8 +265,8 @@ function printHelp(): void {
     `  ${t.muted("# one school, no prompts")}`,
     `  ${bin} --url https://cvsdvt.org`,
     "",
-    `  ${t.muted("# batch from CSV at high concurrency")}`,
-    `  ${bin} --schools-csv schools.csv --max`,
+    `  ${t.muted("# batch from unified CSV at high concurrency")}`,
+    `  ${bin} --schools-csv schools_with_staff_urls.csv --max`,
   ];
   console.log(lines.join("\n"));
 }
@@ -613,9 +613,11 @@ async function runInteractive(): Promise<void> {
 // ── non-interactive batch mode ───────────────────────────────────────────────
 
 interface BatchItem {
-	url: string;
-	outputPath: string;
-	slug: string;
+    url: string;
+    outputPath: string;
+    slug: string;
+    /** Optional pre-seeded staff directory URLs to try first */
+    preferredDirectoryUrls?: string[];
 }
 
 interface BatchOutcome {
@@ -640,10 +642,14 @@ async function scrapeOne(
   url: string,
   outputPath: string,
   tag: string,
+  preferredDirectoryUrls?: string[],
 ): Promise<ScrapeResult> {
   const scrapeConfig: ScrapeConfig = {
     schoolUrl: url,
     outputPath,
+    ...(preferredDirectoryUrls && preferredDirectoryUrls.length > 0
+      ? { preferredDirectoryUrls }
+      : {}),
   };
 	return run(scrapeConfig, {
 		onStatus: (msg) => {
@@ -711,6 +717,7 @@ async function runBatch(
             item.url,
             item.outputPath,
             tag,
+            item.preferredDirectoryUrls,
           );
 					// treat 0 teachers as a retry-eligible failure — it's almost always
 					// a transient scraper gave-up / browser-use flake, not a real
@@ -803,15 +810,15 @@ async function runNonInteractive(flags: CliFlags): Promise<void> {
 	// build work items with output paths. --output only applies when there's
 	// exactly one url; batches always route through output/<slug>.csv because
 	// a single --output would overwrite itself across runs.
-	const items: BatchItem[] = valid.map((url, i) => {
+  const items: BatchItem[] = valid.map((url, i) => {
 		const domain = new URL(url).hostname.replace(/^www\./, "");
 		const slug = slugify(domain);
 		const outputPath =
 			valid.length === 1 && flags.output
 				? resolve(flags.output)
 				: defaultOutputPathFor(url);
-		return { url, outputPath, slug };
-	});
+        return { url, outputPath, slug };
+  });
 
 	console.log(
 		`${BRAND_TAG}  ${t.muted(`${items.length} school${items.length === 1 ? "" : "s"}, concurrency ${flags.concurrency}`)}`,
@@ -1003,11 +1010,12 @@ function parseCsv(text: string): CsvRow[] {
 }
 
 interface SchoolCsvItem {
-  id: string; // from CSV
+  id: string; // from CSV ("Hs ID" or "id")
   name: string;
   state: string; // two-letter
   city: string;
-  url: string;
+  url: string; // school homepage
+  preferredDirectoryUrls?: string[]; // Primary URL + Candidate 1..3
 }
 
 async function loadSchoolsCsv(path: string): Promise<SchoolCsvItem[]> {
@@ -1015,19 +1023,48 @@ async function loadSchoolsCsv(path: string): Promise<SchoolCsvItem[]> {
   const rows = parseCsv(text);
   const items: SchoolCsvItem[] = [];
   for (const r of rows) {
-    const id = r["id"]?.trim();
-    const name = r["name"]?.trim();
-    const state = r["state"]?.trim();
-    const city = r["city"]?.trim();
-    const websiteFinal = r["website_final_url"]?.trim();
-    const website = r["website"]?.trim();
-    const url = (websiteFinal && /^https?:\/\//i.test(websiteFinal))
-      ? websiteFinal
-      : (website && /^https?:\/\//i.test(website))
-        ? website
-        : "";
-    if (!id || !name || !state || !city || !url) continue;
-    items.push({ id, name, state, city, url });
+    // unified CSV format: Hs ID, Name, State, City, School Homepage, Primary URL, Candidate 1..3
+    const id = (r["Hs ID"] ?? r["id"] ?? "").trim();
+    const name = (r["Name"] ?? r["name"] ?? "").trim();
+    const state = (r["State"] ?? r["state"] ?? "").trim();
+    const city = (r["City"] ?? r["city"] ?? "").trim();
+    const homepage = (r["School Homepage"] ?? r["homepage"] ?? r["url"] ?? "").trim();
+    if (!id || !name || !state || !city || !homepage) continue;
+
+    // collect preferred directory URLs (absolute, deduped, up to 3)
+    const primary = (r["Primary URL"] ?? r["Staff URL"] ?? "").trim();
+    const cand1 = (r["Candidate 1"] ?? "").trim();
+    const cand2 = (r["Candidate 2"] ?? "").trim();
+    const cand3 = (r["Candidate 3"] ?? "").trim();
+    const cand1Score = parseInt((r["Candidate 1 Score"] ?? "0").replace(/[^0-9-]/g, "")) || 0;
+    const cand2Score = parseInt((r["Candidate 2 Score"] ?? "0").replace(/[^0-9-]/g, "")) || 0;
+    const cand3Score = parseInt((r["Candidate 3 Score"] ?? "0").replace(/[^0-9-]/g, "")) || 0;
+    const origin = (() => { try { return new URL(homepage).origin; } catch { return ""; } })();
+    type Cand = { url: string; score: number };
+    const cands: Cand[] = [];
+    if (cand1) cands.push({ url: cand1, score: cand1Score });
+    if (cand2) cands.push({ url: cand2, score: cand2Score });
+    if (cand3) cands.push({ url: cand3, score: cand3Score });
+    // Attach a score to Primary URL by matching any candidate with same href; otherwise treat as 0
+    let primaryScore = 0;
+    const match = cands.find((c) => c.url === primary);
+    if (primary && match) cands.unshift({ url: primary, score: match.score });
+    else if (primary) cands.unshift({ url: primary, score: primaryScore });
+
+    const SCORE_THRESHOLD = 5;
+    const absList: string[] = [];
+    for (const c of cands) {
+      if (c.score < SCORE_THRESHOLD) continue;
+      try {
+        const href = new URL(c.url, origin || undefined).href;
+        if (/^https?:\/\//i.test(href)) absList.push(href);
+      } catch {
+        // ignore
+      }
+    }
+    const preferredDirectoryUrls = dedupePreserveOrder(absList).slice(0, 3);
+
+    items.push({ id, name, state, city, url: homepage, ...(preferredDirectoryUrls.length > 0 ? { preferredDirectoryUrls } : {}) });
   }
   return items;
 }
@@ -1037,6 +1074,55 @@ function pathForStateCityId(state: string, city: string, id: string): string {
   const citySlug = slugify(city);
   const idSlug = String(id).trim();
   return resolve("schools", st || "xx", citySlug, `${idSlug}.csv`);
+}
+
+/** simple ordered dedupe */
+function dedupePreserveOrder<T>(arr: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const x of arr) {
+    const k = String(x).toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(x);
+  }
+  return out;
+}
+
+/**
+ * Load staff directory URL hints keyed by school id from a CSV with headers:
+ *  - "Hs ID"
+ *  - "Staff URL"
+ *  - "Staff URL Candidates" (JSON array of { url, score })
+ */
+async function loadStaffUrlHints(path: string): Promise<Map<string, string[]>> {
+  const text = await Bun.file(path).text();
+  const rows = parseCsv(text);
+  const map = new Map<string, string[]>();
+  for (const r of rows) {
+    const id = (r["Hs ID"] ?? r["hs id"] ?? r["HS ID"] ?? "").trim();
+    if (!id) continue;
+    const primary = (r["Staff URL"] ?? "").trim();
+    const candRaw = (r["Staff URL Candidates"] ?? "").trim();
+    const list: string[] = [];
+    if (primary) list.push(primary);
+    if (candRaw) {
+      try {
+        const parsed = JSON.parse(candRaw);
+        if (Array.isArray(parsed)) {
+          for (const c of parsed) {
+            const u = typeof c === "string" ? c : c?.url;
+            if (typeof u === "string" && u.trim()) list.push(u.trim());
+          }
+        }
+      } catch {
+        // ignore malformed JSON in candidates
+      }
+    }
+    const cleaned = dedupePreserveOrder(list.filter((u) => !!u)).slice(0, 3);
+    if (cleaned.length > 0) map.set(id, cleaned);
+  }
+  return map;
 }
 
 async function runFromSchoolsCsv(flags: CliFlags): Promise<void> {
@@ -1051,7 +1137,7 @@ async function runFromSchoolsCsv(flags: CliFlags): Promise<void> {
   }
 
   if (schools.length === 0) {
-    console.error(t.bad("no valid rows in schools csv (need id, name, state, city, website[_final_url])"));
+    console.error(t.bad("no valid rows in schools csv (need: Hs ID, Name, State, City, School Homepage, Primary URL/Candidates)"));
     process.exit(1);
   }
 
@@ -1067,7 +1153,10 @@ async function runFromSchoolsCsv(flags: CliFlags): Promise<void> {
   const items: BatchItem[] = schools.map((s) => {
     const outputPath = pathForStateCityId(s.state, s.city, s.id);
     const slug = `${s.state.toUpperCase()}/${slugify(s.city)}/${s.id}`;
-    return { url: s.url, outputPath, slug };
+    const preferredDirectoryUrls = s.preferredDirectoryUrls && s.preferredDirectoryUrls.length > 0
+      ? s.preferredDirectoryUrls
+      : undefined;
+    return { url: s.url, outputPath, slug, ...(preferredDirectoryUrls ? { preferredDirectoryUrls } : {}) };
   });
 
   console.log(

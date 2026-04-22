@@ -60,21 +60,35 @@ const TeachersSchema = z.object({
 function promptSchoolInfo(schoolUrl: string): string {
   return `Go to ${schoolUrl}.
 
-Your task: this is a SINGLE SCHOOL website. Extract identifying information about THE ONE school.
+Your task: Determine whether this website is for a SINGLE SCHOOL or for a SCHOOL DISTRICT (an umbrella that covers multiple schools). Then extract the official name accordingly.
 
-Before extracting: after the page loads, check the final URL in the address bar. If it differs from ${schoolUrl}, treat the FINAL domain as the authoritative source for subsequent navigation and email inference.
+Before deciding: after the page loads, check the final URL in the address bar. If it differs from ${schoolUrl}, treat the FINAL domain as authoritative for navigation.
 
-━━ NAME EXTRACTION ━━
+━━ CLASSIFY ━━
 
-Use the OFFICIAL, FULL name as it appears in the footer, "Contact Us" page, or "About" page. Do NOT use shorthand from the navigation bar.
+Choose siteType = "district" when ANY of these are true:
+- The site name clearly reads like a district umbrella (e.g. "Public Schools", "School District", "Unified", "ISD", "USD", "County Schools").
+- The top navigation or homepage lists multiple schools or has a "Schools" menu with multiple campuses.
+- The site prominently features district-level content (Board of Education, Superintendent, District Departments) rather than one campus.
+
+Choose siteType = "school" when ANY of these are true:
+- The site is clearly one campus (e.g. "High School", "Middle School", "Elementary", "Academy") with its own athletics, bell schedule, counseling, etc.
+- The footer/contact shows a single school address and there is no multi-school list.
+
+Edge case — one-school districts/charters: If the public site is clearly the single campus page, classify as "school" even if the legal entity is a district.
+
+━━ NAME ━━
+
+- For a district, use the full official district name as shown on the footer/about (avoid nav shorthand).
+- For a school, use the full official school name.
 
 ━━ OUTPUT ━━
 
-Return your answer as structured JSON matching the required schema:
-- siteType: "school" (always)
- - name: the official full name (null only if you genuinely cannot find one)
+Return structured JSON matching the schema:
+- siteType: "district" or "school"
+- name: the official full name (null only if you genuinely cannot find one)
 
-  Do NOT save output to a file. Do NOT use save_output_json. Return the JSON data as your final response via the structured output format.`;
+Do NOT save output to a file. Do NOT use save_output_json. Return the JSON as the final structured response.`;
 }
 
 // (no umbrella prompt in single-school mode)
@@ -82,7 +96,7 @@ Return your answer as structured JSON matching the required schema:
 function promptFindStaffDirectory(): string {
   const commonLabels = `"Staff", "Faculty", "Our Team", "Our Staff", "Directory", "Teachers", "Staff Directory", "Faculty & Staff", "Meet Our Staff", "Employee Directory", "Who's Who", "Our People"`;
 
-  return `Find the staff directory, faculty page, or teacher listing on this single-school website.
+  return `Find the staff directory, faculty page, or teacher listing on this website.
 
 ━━ SEARCH STRATEGY ━━
 
@@ -101,8 +115,12 @@ function promptFindStaffDirectory(): string {
   Do NOT save output to a file — describe what you found as your response.`;
 }
 
-function promptExtractTeachers(): string {
-  return `Visit the staff directory pages you found. Extract EVERY teacher you can find on the site, across ALL subjects.
+function promptExtractTeachers(candidates?: string[]): string {
+  const preface = candidates && candidates.length > 0
+    ? `Start with these candidate directory URLs (in order). Try the first; if it clearly doesn't list teachers (or is a dead page), try the second, then third. If NONE of them yields teacher/faculty entries with names/emails/titles (or profile links that reveal those), THEN search the site as usual using the discovery strategy.\n\nCandidates (in order):\n${candidates.map((u, i) => ` ${i + 1}. ${u}`).join("\n")}\n\n`
+    : "";
+
+  return `${preface}Visit the staff directory pages you found. Extract EVERY teacher you can find on the site, across ALL subjects.
 
 ━━ INCLUDE ━━
 
@@ -189,6 +207,12 @@ export interface ScrapeSchoolOptions {
   onMilestone?: (msg: string, level?: "info" | "warn") => void;
   onLiveUrl?: (url: string) => void;
   /**
+   * If provided, the scraper will start by trying these candidate directory
+   * URLs (in order) and proceed straight to extraction. If none of them work,
+   * it will fall back to the normal discovery flow.
+   */
+  preferredDirectoryUrls?: string[];
+  /**
    * fires at each sub-task boundary inside the scraper. lets the orchestrator
    * advance its phase indicator deterministically without substring-matching
    * browser-agent reasoning (which can spuriously contain phrases like
@@ -204,6 +228,7 @@ export async function scrapeSchool(
   const status = options.onStatus ?? (() => {});
   const milestone = options.onMilestone ?? (() => {});
   const onLiveUrl = options.onLiveUrl;
+  const preferred = (options.preferredDirectoryUrls ?? []).filter(Boolean);
 
   // Hasura bypass removed in single-school mode — always use browser agent.
 
@@ -242,7 +267,7 @@ export async function scrapeSchool(
     }
     debug("SCRAPER", `school info result`, rawSite);
     const siteInfo: RawSiteInfo = {
-      siteType: "school",
+      siteType: rawSite.siteType,
       name: rawSite.name,
     };
 
@@ -251,37 +276,89 @@ export async function scrapeSchool(
     // district" only showed up alongside the final "extracted teachers" at
     // the very end of phase 3. firing inline means the user sees it the
     // moment classification completes.
-    milestone(`detected school: ${siteInfo.name ?? "(unknown)"}`);
+    milestone(`detected ${siteInfo.siteType}: ${siteInfo.name ?? "(unknown)"}`);
 
-    // task 2 — discover staff directory/directories (free-form text is fine here;
-    // used only as navigation context for the agent on its next task)
+    // task 2 — either try provided candidates first, or discover normally
     options.onScraperPhase?.("directory");
-    status("finding staff directory...");
-    try {
-      await runTask(client, sessionId, promptFindStaffDirectory(), {
-        onMessage: options.onStatus,
-        model: SCRAPER_MODEL_DEFAULT,
-      });
-    } catch (dirErr) {
-      debug("SCRAPER", `directory failed with ${SCRAPER_MODEL_DEFAULT}, retrying with ${SCRAPER_MODEL_EXTRACT}`, dirErr);
-      status(`directory failed with ${SCRAPER_MODEL_DEFAULT}, retrying with ${SCRAPER_MODEL_EXTRACT}...`);
-      await runTask(client, sessionId, promptFindStaffDirectory(), {
-        onMessage: options.onStatus,
-        model: SCRAPER_MODEL_EXTRACT,
-      });
+    if (preferred.length > 0) {
+      status("trying provided directory candidates...");
+      milestone(`using ${preferred.length} provided directory candidate${preferred.length === 1 ? "" : "s"}`);
+      // We skip generic discovery here. The extraction prompt will instruct
+      // the agent to fall back to discovery if candidates do not yield results.
+    } else {
+      status("finding staff directory...");
+      try {
+        await runTask(client, sessionId, promptFindStaffDirectory(), {
+          onMessage: options.onStatus,
+          model: SCRAPER_MODEL_DEFAULT,
+        });
+      } catch (dirErr) {
+        debug("SCRAPER", `directory failed with ${SCRAPER_MODEL_DEFAULT}, retrying with ${SCRAPER_MODEL_EXTRACT}`, dirErr);
+        status(`directory failed with ${SCRAPER_MODEL_DEFAULT}, retrying with ${SCRAPER_MODEL_EXTRACT}...`);
+        await runTask(client, sessionId, promptFindStaffDirectory(), {
+          onMessage: options.onStatus,
+          model: SCRAPER_MODEL_EXTRACT,
+        });
+      }
     }
 
     // task 3 — extract teachers (structured output)
     options.onScraperPhase?.("extract");
     status("extracting teachers...");
-    const extraction = await runTaskStructured(
+    // build candidate list: always include the current URL first so direct
+    // runs against a staff page get used immediately, then any provided
+    // preferred URLs, deduped in-order.
+    const candidates = (() => {
+      const list = [schoolUrl, ...preferred];
+      const seen = new Set<string>();
+      const out: string[] = [];
+      for (const u of list) {
+        const k = u.trim();
+        if (!k) continue;
+        const low = k.toLowerCase();
+        if (seen.has(low)) continue;
+        seen.add(low);
+        out.push(k);
+      }
+      return out;
+    })();
+    let extraction = await runTaskStructured(
       client,
       sessionId,
-      promptExtractTeachers(),
+      promptExtractTeachers(candidates),
       TeachersSchema,
       { onMessage: options.onStatus, model: SCRAPER_MODEL_EXTRACT },
     );
     debug("SCRAPER", `extract raw result · ${extraction.teachers.length} teachers`, extraction);
+
+    // candidate-only fallback: if we skipped discovery and got 0, run a
+    // discovery pass and retry extraction once without pinned candidates.
+    if (extraction.teachers.length === 0 && preferred.length > 0) {
+      milestone("candidate URLs yielded 0 teachers — falling back to directory discovery", "warn");
+      status("finding staff directory (fallback)...");
+      try {
+        await runTask(client, sessionId, promptFindStaffDirectory(), {
+          onMessage: options.onStatus,
+          model: SCRAPER_MODEL_DEFAULT,
+        });
+      } catch (dirErr) {
+        debug("SCRAPER", `fallback directory failed with ${SCRAPER_MODEL_DEFAULT}, retrying with ${SCRAPER_MODEL_EXTRACT}`, dirErr);
+        status(`fallback directory failed with ${SCRAPER_MODEL_DEFAULT}, retrying with ${SCRAPER_MODEL_EXTRACT}...`);
+        await runTask(client, sessionId, promptFindStaffDirectory(), {
+          onMessage: options.onStatus,
+          model: SCRAPER_MODEL_EXTRACT,
+        });
+      }
+      status("retrying extraction after discovery...");
+      extraction = await runTaskStructured(
+        client,
+        sessionId,
+        promptExtractTeachers([schoolUrl]),
+        TeachersSchema,
+        { onMessage: options.onStatus, model: SCRAPER_MODEL_EXTRACT },
+      );
+      debug("SCRAPER", `extract (after fallback) · ${extraction.teachers.length} teachers`, extraction);
+    }
 
     // normalize to our RawTeacherData shape (strip nulls where our type expects undefined)
     const teachers: RawTeacherData[] = extraction.teachers.map((t) => ({

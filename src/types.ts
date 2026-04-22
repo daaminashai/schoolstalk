@@ -120,4 +120,11 @@ export interface NCESSchoolRecord {
 export interface ScrapeConfig {
   schoolUrl: string;
   outputPath: string;
+  /**
+   * Optional: pre-seeded staff directory URLs to try in order before running
+   * the generic directory-discovery step. Typically sourced from staff_urls.csv
+   * when running in --schools-csv mode. If none of these yield teachers, the
+   * scraper falls back to the normal discovery flow.
+   */
+  preferredDirectoryUrls?: string[];
 }
