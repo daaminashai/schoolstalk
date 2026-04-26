@@ -8,6 +8,8 @@
 
 import { canonicalizeDepartment } from "./names";
 import { computeHackerScore, isStemRole } from "./validator";
+import { enrichWithLinkedin } from "./linkedin";
+import type { Teacher } from "./types";
 
 type Row = Record<string, string>;
 
@@ -184,6 +186,27 @@ function urlSlug(path: string): string {
   return slug.replace(/[?#].*$/, "");
 }
 
+// Derive a human-ish school context string from a source URL host for employer matching
+function deriveSchoolContextFromUrl(u: string): string {
+  try {
+    const host = new URL(u).hostname.replace(/^www\./, "").toLowerCase();
+    const base = host.split(".")[0] ?? host; // take leftmost label
+    let s = base.replace(/[-_]+/g, " ");
+    // insert spaces before common subwords if the domain is concatenated
+    const SUBWORDS = [
+      "charter", "school", "academy", "district", "unified", "union",
+      "public", "prep", "preparatory", "high", "middle", "elementary",
+    ];
+    for (const sub of SUBWORDS) {
+      s = s.replace(new RegExp(sub, "g"), ` ${sub} `);
+    }
+    s = s.replace(/\s+/g, " ").trim();
+    return s;
+  } catch {
+    return "";
+  }
+}
+
 // Simple global rate gate for Exa (≤8 rps)
 const EXA_MAX_RPS = 8;
 let lastExaStart = 0;
@@ -218,6 +241,7 @@ async function findPresence(
   onLog?: (msg: string) => void,
 ): Promise<{ hits: PresenceHit[]; eventHits: string[]; xtraHits: string[] }> {
   const schoolToks = schoolTokensFromUrl(sourceUrl);
+  const schoolCtx = deriveSchoolContextFromUrl(sourceUrl);
   const platformDomains = [
     { platform: "linkedin", site: "site:linkedin.com/in" },
     { platform: "x", site: "site:x.com" },
@@ -234,7 +258,9 @@ async function findPresence(
     const batch = platformDomains.slice(i, i + concurrency);
     const results = await Promise.allSettled(
       batch.map(async (pd) => {
-        const q = `"${first} ${last}" ${pd.site}`;
+        const q = schoolCtx
+          ? `"${first} ${last}" "${schoolCtx}" ${pd.site}`
+          : `"${first} ${last}" ${pd.site}`;
         onLog?.(`[presence] query(${pd.platform}): ${q}`);
         const rs = await exaSearch(q, exaKey);
         onLog?.(`[presence] results(${pd.platform}): ${rs.length}`);
@@ -244,8 +270,8 @@ async function findPresence(
           const okName = nameAppears(r.title || urlSlug(u), first, last);
           onLog?.(`  • ${pd.platform} → ${u} | title=${r.title ?? "(none)"} | name_ok=${okName}`);
           if (!okName) continue;
-          // Prefer matches referencing the school; relax for github/x
-          const requireSchool = !(pd.platform === "github" || pd.platform === "x" || pd.platform === "twitter");
+          // Require school reference for ALL platforms to avoid same-name false positives
+          const requireSchool = true;
           const schoolOk = r.title ? phraseReferencesSchool(r.title, schoolToks) : false;
           if (requireSchool && !schoolOk) { onLog?.(`    ↳ rejected (no school context)`); continue; }
           hits.push({ platform: pd.platform, url: u.replace(/[?#].*$/, ""), title: r.title });
@@ -260,9 +286,9 @@ async function findPresence(
 
   // personal site queries (try to find non-social website)
   const personalQueries = [
-    `"${first} ${last}" teacher ${(schoolToks[0] ?? "")}`,
-    `"${first} ${last}" site:sites.google.com`,
-    `"${first} ${last}" site:.edu`,
+    schoolCtx ? `"${first} ${last}" "${schoolCtx}" teacher` : `"${first} ${last}" teacher`,
+    schoolCtx ? `"${first} ${last}" "${schoolCtx}" site:sites.google.com` : `"${first} ${last}" site:sites.google.com`,
+    schoolCtx ? `"${first} ${last}" "${schoolCtx}" site:.edu` : `"${first} ${last}" site:.edu`,
   ];
   const socialHosts = /linkedin\.com|twitter\.com|x\.com|github\.com|instagram\.com|facebook\.com|youtube\.com/i;
   for (const q of personalQueries) {
@@ -292,7 +318,7 @@ async function findPresence(
 
   async function queryKw(kwList: string[], tag: string): Promise<string[]> {
     const found: string[] = [];
-    const q = `"${first} ${last}" ${(schoolToks[0] ?? "teacher")}`;
+    const q = schoolCtx ? `"${first} ${last}" "${schoolCtx}"` : `"${first} ${last}" ${(schoolToks[0] ?? "teacher")}`;
     // run a few topic-augmented searches
     const topics = kwList.slice(0, 4);
     const rs = await Promise.allSettled(topics.map(async (k) => {
@@ -344,9 +370,10 @@ function baseScore(first: string, last: string, role: string, dept: string | nul
 }
 
 function aggregateScore(hackerScore: number, presence: number, events: number, xtra: number, hsBonus: number): number {
-  const s = 0.45 * norm01(hackerScore, 1, 5) * 100
-          + 0.35 * norm01(presence, 0, 5) * 100
-          + 0.20 * norm01(events + xtra, 0, 6) * 100
+  // Heavier weight on hackerScore so CS/Engineering/Robotics outrank generic Math/Science
+  const s = 0.55 * norm01(hackerScore, 1, 5) * 100
+          + 0.30 * norm01(presence, 0, 5) * 100
+          + 0.15 * norm01(events + xtra, 0, 6) * 100
           + hsBonus;
   return Math.max(0, Math.min(100, Math.round(s)));
 }
@@ -428,6 +455,39 @@ async function main(): Promise<void> {
 
   // Enrichment (best-effort)
   if (exaKey) {
+    // 1) Try LinkedIn enrichment first using robust matching (name + employer + K-12 checks)
+    try {
+      const liTeachers: Teacher[] = ranked.map((rt) => ({
+        firstName: rt.firstName,
+        lastName: rt.lastName,
+        email: rt.email,
+        role: rt.role,
+        department: rt.subject ?? rt.department,
+        linkedinUrl: null,
+        sources: ["school_website"],
+        confidence: 1,
+        hackerScore: rt.hackerScore as any,
+      }));
+      // Use host-derived school context to require employer match and avoid same-name false positives
+      const fallbackContext = deriveSchoolContextFromUrl(ranked[0]?.sourceUrl || "");
+      const { teachers: enriched } = await enrichWithLinkedin(liTeachers, fallbackContext);
+      const byKey = new Map(enriched.map((t) => [`${t.firstName}\u0001${t.lastName}\u0001${t.email ?? ""}`, t] as const));
+      for (const rt of ranked) {
+        const t = byKey.get(`${rt.firstName}\u0001${rt.lastName}\u0001${rt.email ?? ""}`);
+        if (t?.linkedinUrl) {
+          // Boost presence for verified LinkedIn; add link and label
+          rt.presenceScore = Math.min(5, Math.max(rt.presenceScore, 0) + 2.0);
+          if (!rt.labels.includes("internet_active")) rt.labels.push("internet_active");
+          if (!rt.labels.includes("linkedin")) rt.labels.push("linkedin");
+          rt.links = Array.from(new Set([t.linkedinUrl, ...rt.links]));
+        }
+      }
+    } catch (err) {
+      // non-fatal — continue without linkedin boost
+      if (flags.verbose) console.log(`[linkedin] enrichment skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // 2) General web presence via Exa across platforms/events
     let cursor = 0; const conc = Math.max(1, flags.concurrency || 3);
     async function worker() {
       while (true) {
@@ -439,8 +499,8 @@ async function main(): Promise<void> {
           const pres = await findPresence(rt.firstName, rt.lastName, rt.sourceUrl, exaKey, Math.min(3, conc), flags.verbose ? (m) => console.log(m) : undefined);
           const platforms = new Set(pres.hits.map((h) => h.platform));
           // presence score weights
-          let pScore = 0;
-          if (platforms.has("linkedin")) pScore += 1.0;
+          let pScore = rt.presenceScore || 0; // carry any linkedin boost from enrichment
+          if (platforms.has("linkedin")) pScore += 2.0; // prefer LinkedIn explicitly
           if (platforms.has("x") || platforms.has("twitter")) pScore += 1.0;
           if (platforms.has("github")) pScore += 1.5;
           if (platforms.has("instagram")) pScore += 0.75;
@@ -453,10 +513,14 @@ async function main(): Promise<void> {
           rt.presenceScore = pScore;
           rt.eventScore = eScore;
           rt.xtraScore = xScore;
-          if (pScore >= 2) rt.labels.push("internet_active");
-          if (eScore >= 1) rt.labels.push("event_attendee");
-          if (xScore >= 1) rt.labels.push("extracurriculars");
-          rt.links = Array.from(new Set([...pres.hits.map((h) => h.url), ...pres.eventHits, ...pres.xtraHits]));
+          if (pScore >= 2 && !rt.labels.includes("internet_active")) rt.labels.push("internet_active");
+          if (eScore >= 1 && !rt.labels.includes("event_attendee")) rt.labels.push("event_attendee");
+          if (xScore >= 1 && !rt.labels.includes("extracurriculars")) rt.labels.push("extracurriculars");
+          const newLinks = [...pres.hits.map((h) => h.url), ...pres.eventHits, ...pres.xtraHits];
+          rt.links = Array.from(new Set([...
+            rt.links,
+            ...newLinks,
+          ]));
           if (flags.verbose) {
             console.log(`[presence] scores: presence=${rt.presenceScore} events=${rt.eventScore} xtra=${rt.xtraScore}`);
             if (rt.links.length) console.log(`[presence] links: ${rt.links.join(" | ")}`);

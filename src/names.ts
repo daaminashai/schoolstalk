@@ -143,6 +143,7 @@ export function canonicalizeDepartment(raw: string | null | undefined): string |
     "digital learning": "Technology",
 
     "stem": "STEM",
+    "steam": "STEAM",
 
     "robotics": "Robotics",
     "maker": "Maker",
@@ -157,6 +158,7 @@ export function canonicalizeDepartment(raw: string | null | undefined): string |
   if (/\b(comput|coding|programming|software)/.test(lower)) return "Computer Science";
   if (/\b(engineering)/.test(lower)) return "Engineering";
   if (/\b(robotic)/.test(lower)) return "Robotics";
+  if (/\b(steam)\b/.test(lower)) return "STEAM";
   if (/\b(stem)\b/.test(lower)) return "STEM";
   if (/\b(physic)/.test(lower)) return "Physics";
   if (/\b(chem)/.test(lower)) return "Chemistry";

@@ -506,6 +506,10 @@ function resultMatchesTeacher(
   // educator signal (teacher / educator / interventionist / etc). deliberately
   // excludes "university", "professor", "lecturer" — those catch unrelated
   // higher-ed people with matching names (Sharon Waxman's "University Lecturer").
+  // If we have a target school/district context, require an employer reference;
+  // don't accept generic educator titles with no employer — prevents same-name
+  // matches from other districts.
+  if (targets.length > 0) return false;
   return titleSuggestsK12Educator(result.title);
 }
 

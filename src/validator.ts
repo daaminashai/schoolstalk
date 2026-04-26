@@ -24,8 +24,12 @@ const SCIENCE_KEYWORDS = [
 ];
 
 const TECH_KEYWORDS = [
-  "computer science", "engineering", "stem", "technology", "robotics",
+  // core
+  "computer science", "engineering", "stem", "steam", "technology", "robotics",
   "coding", "programming", "information technology",
+  // common STEM-adjacent program labels that might be the only signal present
+  "maker", "makerspace", "cad", "drafting", "pltw", "project lead the way",
+  "engineering design", "principles of engineering", "design tech", "design technology",
 ];
 
 const STEM_KEYWORDS = [...TECH_KEYWORDS, ...SCIENCE_KEYWORDS, ...MATH_KEYWORDS];
@@ -414,6 +418,7 @@ const HACKER_TIERS: { score: HackerScore; patterns: RegExp[] }[] = [
     patterns: [
       /\bengineering\b/i,
       /\brobotics\b/i,
+      /\bSTEAM\b/i,
       /\bmaker\s*(space|lab)?\b/i,
       /\b3d\s+printing\b/i,
       /\belectronics\b/i,
