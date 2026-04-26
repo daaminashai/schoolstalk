@@ -139,13 +139,13 @@ function promptExtractTeachers(candidates?: string[]): string {
 - name: full name (first + last). Strip titles (Dr., Mr., Mrs., Ms.) and postnominals (Jr., PhD, MEd).
 - email: exact email address — mailto: links, on-page text, contact sections. Normalize obfuscated forms ("a [at] b [dot] edu" → "a@b.edu"). If no email is visible anywhere, set null — never guess. **Returning teachers with email=null is always better than returning an empty teacher array** — downstream validation infers emails from the district's naming pattern when ≥3 real emails are seen, but it needs SOME teachers to work with. Never skip extracting a teacher just because their email isn't visible.
 - role: their job title as written ("AP Physics Teacher", "Math Department Chair"). What they DO.
-- department: SUBJECT only — e.g. "Science", "Mathematics", "Computer Science", "Engineering", "Technology". NEVER a school name. NEVER a grade level. Infer from role if the site doesn't name a department.
- - department: SUBJECT only — e.g. "Science", "Mathematics", "Computer Science", "Engineering", "Technology". NEVER a school name. NEVER a grade level. Infer from role if the site doesn't name a department.
+  - department: SUBJECT only — e.g. "Science", "Mathematics", "Computer Science", "Engineering", "Technology". NEVER a school name. NEVER a grade level. If the page does NOT explicitly show a department/subject label, set department = null. Do NOT infer or guess from the role.
 
 ━━ CRITICAL ANTI-PATTERNS ━━
 
 ❌ Never put a school name in the department field
 ❌ Never put a grade level in the department field
+❌ Never infer a department from a role title — leave department null unless it is explicitly labeled on the page
 ❌ Never put a district name in assignedSchool
 ❌ Never combine two real schools into one assignedSchool
 ❌ Never fabricate an email

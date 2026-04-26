@@ -7,7 +7,7 @@
 // - Adds labels and reasons for justification
 
 import { canonicalizeDepartment } from "./names";
-import { computeHackerScore } from "./validator";
+import { computeHackerScore, isStemRole } from "./validator";
 
 type Row = Record<string, string>;
 
@@ -395,7 +395,7 @@ async function main(): Promise<void> {
   }).filter((t) => (t.firstName || t.lastName));
 
   // Baseline scoring
-  const ranked: RankedTeacher[] = teachers.map((t) => {
+  let ranked: RankedTeacher[] = teachers.map((t) => {
     const base = baseScore(t.firstName, t.lastName, t.role, t.department);
     if (flags.verbose) {
       console.log(`[baseline] ${t.firstName} ${t.lastName} | role=${t.role} | dept=${t.department ?? ""} | subject=${base.subject ?? ""} | hacker=${base.hackerScore} | hs_bonus=${base.hsBonus}`);
@@ -421,6 +421,10 @@ async function main(): Promise<void> {
       reasons: [],
     };
   });
+
+  // Strict STEM filter: ignore non-STEM subjects (e.g., PE, ELA, arts)
+  // Keep only CS, Math, Science, STEM, and close fields like robotics/tech/IT/engineering.
+  ranked = ranked.filter((rt) => isStemRole(rt.role, rt.subject));
 
   // Enrichment (best-effort)
   if (exaKey) {

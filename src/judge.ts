@@ -308,5 +308,6 @@ async function judgeLinkedinChunk(
  * format stays consistent across passes.
  */
 export function teacherSummary(t: Teacher): string {
-  return `${t.firstName} ${t.lastName} — ${t.role}${t.department ? ` (${t.department})` : ""}`;
+  // Show role only; department is omitted to avoid redundant/contradictory labels
+  return `${t.firstName} ${t.lastName} — ${t.role}`;
 }

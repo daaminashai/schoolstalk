@@ -71,10 +71,11 @@ function reconcileDepartment(
 ): string | null {
   const fromRole = canonicalizeDepartment(role ?? null);
 
-  // case 1: no dept — fall back to role-derived dept only if it's STEM.
-  // canonicalizeDepartment title-cases unknown inputs (so "Teacher" → "Teacher"),
-  // which would pollute the dept column. require an actual STEM subject.
-  if (!department) return fromRole && isStemRole("", fromRole) ? fromRole : null;
+  // case 1: no dept — leave blank. Do NOT infer from role.
+  // Previously we derived a STEM subject from the role text; this caused
+  // hallucinated departments. The new contract is: if the site doesn't name
+  // a department, keep it null and carry subject/grade info only in `role`.
+  if (!department) return null;
 
   if (!fromRole || !isStemRole("", fromRole) || fromRole === department) return department;
 

@@ -166,10 +166,21 @@ function parseArgs(argv: string[]): CliFlags {
     maxAggression: false,
   };
 
-	for (let i = 0; i < argv.length; i++) {
-		const a = argv[i]!;
-		const next = () => argv[++i];
-		switch (a) {
+  	for (let i = 0; i < argv.length; i++) {
+    	const a = argv[i]!;
+    	// support --concurrency=1 and -j1 / -j=1 forms
+    	const concEq = a.match(/^--concurrency=(\d+)$/);
+    	const jPacked = a.match(/^-j=?([0-9]+)$/);
+    	if (concEq) {
+    		flags.concurrency = Math.max(1, parseInt(concEq[1]!, 10));
+    		continue;
+    	}
+    	if (jPacked) {
+    		flags.concurrency = Math.max(1, parseInt(jPacked[1]!, 10));
+    		continue;
+    	}
+    	const next = () => argv[++i];
+    	switch (a) {
 			case "-h":
 			case "--help":
 				flags.help = true;
@@ -191,9 +202,26 @@ function parseArgs(argv: string[]): CliFlags {
         flags.mergedOutput = next() ?? null;
         break;
       case "--concurrency":
-      case "-j":
-        flags.concurrency = Math.max(1, Number(next()) || 3);
+      case "-j": {
+        // accept space-separated value, including the accidental "--1" form
+        const peek = argv[i + 1];
+        let val: number | null = null;
+        if (typeof peek === "string") {
+          // "--1" or "-1" → 1
+          const m = peek.match(/^--?(\d+)$/);
+          if (m) {
+            i++;
+            val = parseInt(m[1]!, 10);
+          } else if (!peek.startsWith("-")) {
+            // plain number token
+            i++;
+            const n = Number(peek);
+            if (Number.isFinite(n)) val = n;
+          }
+        }
+        if (val != null) flags.concurrency = Math.max(1, Math.floor(val));
         break;
+      }
       case "--max":
         flags.maxAggression = true;
         break;
