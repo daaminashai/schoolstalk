@@ -1,0 +1,38 @@
+.git
+.gitignore
+.idea
+.claude
+.DS_Store
+
+node_modules
+
+# large data files — mount as volume instead of baking in
+*.csv
+schools/
+output/
+out/
+dist/
+
+# secrets
+.env
+.env.*
+
+# docs / scratch
+README.md
+DESIGN.md
+HANDOFF.md
+RECURSE.md
+
+# logs / coverage / caches
+logs/
+*.log
+coverage/
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# misc
+profiles/
+*.tgz
+Dockerfile
+.dockerignore
