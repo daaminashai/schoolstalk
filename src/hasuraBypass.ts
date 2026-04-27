@@ -351,9 +351,8 @@ export async function scrapeViaHasura(
     assignedSchool: t.assignedSchool,
   }));
 
-  // 4. synthesize RawSiteInfo — always district mode for Hasura bypass
+  // 4. synthesize RawSiteInfo — in single-school mode this is unused, retain name for compatibility
   const siteInfo: RawSiteInfo = {
-    siteType: "district",
     name: metadata.districtName,
     // hard-coded address ensures the orchestrator's extractState() picks up
     // the right state. empty strings cause it to fall back to URL parsing,

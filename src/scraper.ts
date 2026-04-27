@@ -38,7 +38,6 @@ const EXCLUSIONS = [
 // ── zod schemas for structured agent output ────────────────────────────────
 
 const SiteInfoSchema = z.object({
-  siteType: z.enum(["district", "school"]),
   name: z.string().nullable(),
 });
 
@@ -60,33 +59,14 @@ const TeachersSchema = z.object({
 function promptSchoolInfo(schoolUrl: string): string {
   return `Go to ${schoolUrl}.
 
-Your task: Determine whether this website is for a SINGLE SCHOOL or for a SCHOOL DISTRICT (an umbrella that covers multiple schools). Then extract the official name accordingly.
+Your task: Extract the official SCHOOL name for this website. Use the full official name as shown on the page (avoid nav shorthand).
 
-Before deciding: after the page loads, check the final URL in the address bar. If it differs from ${schoolUrl}, treat the FINAL domain as authoritative for navigation.
-
-━━ CLASSIFY ━━
-
-Choose siteType = "district" when ANY of these are true:
-- The site name clearly reads like a district umbrella (e.g. "Public Schools", "School District", "Unified", "ISD", "USD", "County Schools").
-- The top navigation or homepage lists multiple schools or has a "Schools" menu with multiple campuses.
-- The site prominently features district-level content (Board of Education, Superintendent, District Departments) rather than one campus.
-
-Choose siteType = "school" when ANY of these are true:
-- The site is clearly one campus (e.g. "High School", "Middle School", "Elementary", "Academy") with its own athletics, bell schedule, counseling, etc.
-- The footer/contact shows a single school address and there is no multi-school list.
-
-Edge case — one-school districts/charters: If the public site is clearly the single campus page, classify as "school" even if the legal entity is a district.
-
-━━ NAME ━━
-
-- For a district, use the full official district name as shown on the footer/about (avoid nav shorthand).
-- For a school, use the full official school name.
+Before deciding on the name: after the page loads, check the final URL in the address bar. If it differs from ${schoolUrl}, treat the FINAL domain as authoritative for navigation.
 
 ━━ OUTPUT ━━
 
 Return structured JSON matching the schema:
-- siteType: "district" or "school"
-- name: the official full name (null only if you genuinely cannot find one)
+- name: the official full school name (null only if you genuinely cannot find one)
 
 Do NOT save output to a file. Do NOT use save_output_json. Return the JSON as the final structured response.`;
 }
@@ -267,7 +247,6 @@ export async function scrapeSchool(
     }
     debug("SCRAPER", `school info result`, rawSite);
     const siteInfo: RawSiteInfo = {
-      siteType: rawSite.siteType,
       name: rawSite.name,
     };
 
@@ -276,7 +255,7 @@ export async function scrapeSchool(
     // district" only showed up alongside the final "extracted teachers" at
     // the very end of phase 3. firing inline means the user sees it the
     // moment classification completes.
-    milestone(`detected ${siteInfo.siteType}: ${siteInfo.name ?? "(unknown)"}`);
+    milestone(`detected school: ${siteInfo.name ?? "(unknown)"}`);
 
     // task 2 — either try provided candidates first, or discover normally
     options.onScraperPhase?.("directory");

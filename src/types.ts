@@ -72,10 +72,9 @@ export interface RawTeacherData {
   department?: string;
 }
 
-// raw shape for district/school site info returned by the scraper ai pass
+// raw shape for site info returned by the scraper ai pass
 export interface RawSiteInfo {
-  siteType: "district" | "school";
-  // the primary name.
+  // the official school name for the scraped URL
   name: string | null;
   // optional legacy fields — present in older flows, ignored in current runtime
   address?: string | null;

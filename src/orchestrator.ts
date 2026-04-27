@@ -137,11 +137,7 @@ export async function run(
       log,
       warnings,
     );
-    if (district) {
-      milestone(
-        `NCES: matched district ${district.name} · ${schools.length} school${schools.length === 1 ? "" : "s"} in roster`,
-      );
-    } else if (schools.length > 0) {
+    if (schools.length > 0) {
       const s0 = schools[0]!;
       if (s0.ncesId) {
         milestone(`NCES: verified school ${s0.name} (${s0.ncesId})`);
@@ -294,9 +290,7 @@ async function resolveSites(
   log: (msg: string) => void,
   warnings: string[],
 ): Promise<{ district: DistrictInfo | null; schools: SchoolInfo[] }> {
-  if (siteInfo.siteType === "district") {
-    return resolveDistrict(siteInfo, schoolUrl, state, teachers, log, warnings);
-  }
+  // Single-school only — district flow removed
   return resolveSingleSchool(siteInfo, schoolUrl, state, log, warnings);
 }
 
