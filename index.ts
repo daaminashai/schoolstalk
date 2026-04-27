@@ -20,6 +20,7 @@ import { missingRequiredEnv, runSetupWizard } from "./src/setup";
 import { createClient, killActiveSessions } from "./src/browser";
 import { debug } from "./src/debug";
 import { createSlackFromEnv, SlackNotifier, SlackThreadBuffer } from "./src/slack";
+import { claim, release, describeOwner, installCleanupHandlers } from "./src/lock";
 import type { ScrapeConfig, ScrapeResult, Teacher } from "./src/types";
 import os from "node:os";
 
@@ -671,6 +672,8 @@ interface BatchItem {
     slug: string;
     /** Optional pre-seeded staff directory URLs to try first */
     preferredDirectoryUrls?: string[];
+    /** high_schools.id, set in --schools-csv mode for DB upsert */
+    hsId?: number;
 }
 
 interface BatchOutcome {
@@ -697,6 +700,7 @@ async function scrapeOne(
   tag: string,
   preferredDirectoryUrls?: string[],
   slackBuf?: SlackThreadBuffer | null,
+  hsId?: number,
 ): Promise<ScrapeResult> {
   const scrapeConfig: ScrapeConfig = {
     schoolUrl: url,
@@ -704,6 +708,7 @@ async function scrapeOne(
     ...(preferredDirectoryUrls && preferredDirectoryUrls.length > 0
       ? { preferredDirectoryUrls }
       : {}),
+    ...(hsId != null ? { hsId } : {}),
   };
 	return run(scrapeConfig, {
 		onStatus: (msg) => {
@@ -739,6 +744,11 @@ async function runBatch(
   force: boolean,
   slack?: SlackNotifier | null,
 ): Promise<BatchOutcome[]> {
+	// release any locks held by this process if the user ctrl-c's or the
+	// process crashes — otherwise other workers / future runs would have to
+	// wait out the stale-lock timeout before retrying.
+	installCleanupHandlers();
+
 	const outcomes: BatchOutcome[] = new Array(items.length);
 	let cursor = 0;
 
@@ -761,7 +771,8 @@ async function runBatch(
                 }
             }
 
-			if (!force && existsSync(item.outputPath)) {
+			const claimResult = claim(item.outputPath, force);
+			if (claimResult.kind === "done") {
 				console.log(
 					`${t.muted(tag)} ${t.muted("skipped (output exists — pass --force to re-scrape)")}`,
 				);
@@ -773,6 +784,24 @@ async function runBatch(
 				};
 				continue;
 			}
+			if (claimResult.kind === "in_progress") {
+				const owner = describeOwner(item.outputPath) ?? "unknown owner";
+				console.log(
+					`${t.muted(tag)} ${t.muted(`skipped (locked by another worker · ${owner})`)}`,
+				);
+				if (threadTs) slack?.postInThread(threadTs, `⏭️ Skipped (locked by another worker).`).catch(() => {});
+				outcomes[myIdx] = {
+					item,
+					status: "skipped",
+					durationMs: Date.now() - start,
+				};
+				continue;
+			}
+			if (claimResult.kind === "stale_reclaimed") {
+				console.log(
+					`${t.muted(tag)} ${t.warn("⚠ stale lock reclaimed — previous run crashed mid-scrape")}`,
+				);
+			}
 
 			console.log(`${t.muted(tag)} ${t.bold("starting")} ${t.brand(item.url)}`);
             // avoid mid-run Slack noise; only final summaries will be sent
@@ -782,63 +811,72 @@ async function runBatch(
 			// ~5-10% of a 15-school batch would silently fail on a judge's test.
 			let result: ScrapeResult | null = null;
 			let lastError = "";
-			for (let attempt = 1; attempt <= 2; attempt++) {
-				try {
-          const r = await scrapeOne(
-            item.url,
-            item.outputPath,
-            tag,
-            item.preferredDirectoryUrls,
-            buf,
-          );
-					// treat 0 teachers as a retry-eligible failure — it's almost always
-					// a transient scraper gave-up / browser-use flake, not a real
-					// empty district. a real empty district is vanishingly rare.
-					if (r.teachers.length === 0 && attempt === 1) {
-						console.log(
-							`${t.muted(tag)} ${t.warn("! first attempt returned 0 teachers — retrying once")}`,
-						);
-                        buf?.markRetried();
-                        lastError = "0 teachers on first attempt";
-                        continue;
-                    }
-                    result = r;
-                    break;
-                } catch (err) {
-                    lastError = err instanceof Error ? err.message : String(err);
-                    if (attempt === 1) {
-                        console.log(
-                            `${t.muted(tag)} ${t.warn("! first attempt failed:")} ${lastError} ${t.muted("— retrying once")}`,
-                        );
-                        buf?.markRetried();
-                    }
-                }
-            }
+			try {
+				for (let attempt = 1; attempt <= 2; attempt++) {
+					try {
+			  const r = await scrapeOne(
+				item.url,
+				item.outputPath,
+				tag,
+				item.preferredDirectoryUrls,
+				buf,
+				item.hsId,
+			  );
+						// treat 0 teachers as a retry-eligible failure — it's almost always
+						// a transient scraper gave-up / browser-use flake, not a real
+						// empty district. a real empty district is vanishingly rare.
+						if (r.teachers.length === 0 && attempt === 1) {
+							console.log(
+								`${t.muted(tag)} ${t.warn("! first attempt returned 0 teachers — retrying once")}`,
+							);
+							buf?.markRetried();
+							lastError = "0 teachers on first attempt";
+							continue;
+						}
+						result = r;
+						break;
+					} catch (err) {
+						lastError = err instanceof Error ? err.message : String(err);
+						if (attempt === 1) {
+							console.log(
+								`${t.muted(tag)} ${t.warn("! first attempt failed:")} ${lastError} ${t.muted("— retrying once")}`,
+							);
+							buf?.markRetried();
+						}
+					}
+				}
 
-            if (result) {
-                const dur = ((Date.now() - start) / 1000).toFixed(1);
-                console.log(
-                    `${t.muted(tag)} ${t.ok("✓ done")} ${t.accent(String(result.teachers.length))} ${t.muted("teachers")} ${t.muted(`(${dur}s)`)}`,
-                );
-                if (buf) await buf.finalizeSuccess(result.teachers.length, dur, item.outputPath);
-                outcomes[myIdx] = {
-                    item,
-                    status: "ok",
-                    result,
-                    durationMs: Date.now() - start,
-                };
-            } else {
-                console.log(
-                    `${t.muted(tag)} ${t.bad("✗ failed (after retry):")} ${lastError}`,
-                );
-                if (buf) await buf.finalizeFailure(`Failed after retry: ${lastError}`);
-                outcomes[myIdx] = {
-                    item,
-                    status: "failed",
-                    error: lastError,
-                    durationMs: Date.now() - start,
-                };
-            }
+				if (result) {
+					const dur = ((Date.now() - start) / 1000).toFixed(1);
+					console.log(
+						`${t.muted(tag)} ${t.ok("✓ done")} ${t.accent(String(result.teachers.length))} ${t.muted("teachers")} ${t.muted(`(${dur}s)`)}`,
+					);
+					if (buf) await buf.finalizeSuccess(result.teachers.length, dur, item.outputPath);
+					outcomes[myIdx] = {
+						item,
+						status: "ok",
+						result,
+						durationMs: Date.now() - start,
+					};
+				} else {
+					console.log(
+						`${t.muted(tag)} ${t.bad("✗ failed (after retry):")} ${lastError}`,
+					);
+					if (buf) await buf.finalizeFailure(`Failed after retry: ${lastError}`);
+					outcomes[myIdx] = {
+						item,
+						status: "failed",
+						error: lastError,
+						durationMs: Date.now() - start,
+					};
+				}
+			} finally {
+				// always release the lock — success, failure, or thrown. On success
+				// the CSV at outputPath is the durable record; on failure we want a
+				// future run (or a parallel worker) to be able to retry the school
+				// without waiting for the stale-lock timeout.
+				release(item.outputPath);
+			}
 		}
 	}
 
@@ -1234,7 +1272,7 @@ async function runFromSchoolsCsv(flags: CliFlags): Promise<void> {
     const preferredDirectoryUrls = s.preferredDirectoryUrls && s.preferredDirectoryUrls.length > 0
       ? s.preferredDirectoryUrls
       : undefined;
-    return { url: s.url, outputPath, slug, ...(preferredDirectoryUrls ? { preferredDirectoryUrls } : {}) };
+    return { url: s.url, outputPath, slug, hsId: s.id, ...(preferredDirectoryUrls ? { preferredDirectoryUrls } : {}) };
   });
 
   console.log(

@@ -126,4 +126,10 @@ export interface ScrapeConfig {
    * scraper falls back to the normal discovery flow.
    */
   preferredDirectoryUrls?: string[];
+  /**
+   * Optional: high_schools.id from the canonical roster. When present (always
+   * true in --schools-csv mode), the orchestrator upserts each school's
+   * teachers into public.extracted_teachers as soon as the CSV is written.
+   */
+  hsId?: number;
 }

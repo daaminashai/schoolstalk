@@ -17,6 +17,7 @@ import { validateEmailsBatched } from "./emailValidator";
 import { generateCsv, writeCsv } from "./csv";
 import { extractDomain } from "./utils";
 import { debug } from "./debug";
+import { upsertTeachers } from "./db";
 import {
   lookupDistrict,
   lookupSchoolsInDistrict,
@@ -264,6 +265,14 @@ export async function run(
   log("writing CSV...");
   const csv = generateCsv(result);
   await writeCsv(config.outputPath, csv);
+
+  // Optional: stream teachers into Postgres immediately. No-op when
+  // DATABASE_URL is unset or hsId is unknown. Failure is logged but does
+  // not abort — the CSV on disk is the durable record.
+  if (config.hsId != null) {
+    const dbResult = await upsertTeachers(config.hsId, config.schoolUrl, teachers);
+    if (dbResult) log(`db: upserted ${dbResult.written} teachers`);
+  }
 
   debug("ORCH", `run() complete · ${((Date.now() - startTime) / 1000).toFixed(2)}s · ${teachers.length} teachers, ${warnings.length} warnings`, {
     outputPath: config.outputPath,
