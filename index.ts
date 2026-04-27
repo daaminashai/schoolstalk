@@ -19,6 +19,7 @@ import { generateMergedCsv, writeCsv } from "./src/csv";
 import { missingRequiredEnv, runSetupWizard } from "./src/setup";
 import { createClient, killActiveSessions } from "./src/browser";
 import { debug } from "./src/debug";
+import { createSlackFromEnv, SlackNotifier, SlackThreadBuffer } from "./src/slack";
 import type { ScrapeConfig, ScrapeResult, Teacher } from "./src/types";
 import os from "node:os";
 
@@ -557,6 +558,21 @@ async function runInteractive(): Promise<void> {
       .trim();
   }
 
+	const slack: SlackNotifier | null = createSlackFromEnv();
+	let slackThread: string | null = null;
+	let slackBuf: SlackThreadBuffer | null = null;
+	if (slack) {
+		try {
+			slackThread = await slack.startThread(`▶️ Starting scrape: ${config.schoolUrl}`);
+			if (slackThread) slackBuf = new SlackThreadBuffer(slack, slackThread);
+		} catch {}
+		if (!slackThread) {
+			p.log.warn(
+				`slack: unable to post to channel. ensure SLACK_BOT_TOKEN, SLACK_CHANNEL_ID are set, the app has chat:write, and is invited to the channel (${slack.getLastError() || "unknown error"}).`,
+			);
+		}
+	}
+
 	try {
     const scrapeConfig: ScrapeConfig = {
       schoolUrl: config.schoolUrl,
@@ -579,6 +595,7 @@ async function runInteractive(): Promise<void> {
 				phasePrefix = formatPhasePrefix(phase, idx, total);
 				lastSubstatus = ""; // clear per-phase substatus on transition
 				refreshSpinner({ immediate: true });
+				slackBuf?.addPhase(PHASE_LABELS[phase]);
 			},
 			onMilestone: (msg, level) => {
 				debug("MILESTONE", `[${level ?? "info"}] ${msg}`);
@@ -592,6 +609,7 @@ async function runInteractive(): Promise<void> {
 				spinner.start(phasePrefix || "");
 				lastRendered = ""; // spinner.start resets the line
 				refreshSpinner({ immediate: true });
+				slackBuf?.addMilestone(msg, level);
 			},
 			onLiveUrl: (liveUrl) => {
 				spinner.stop("browser session started");
@@ -599,6 +617,7 @@ async function runInteractive(): Promise<void> {
 					`${t.bold("watch live")}  ${t.brand(color.underline(liveUrl))}`,
 				);
 				spinner.start(phasePrefix || "crawling...");
+				slackBuf?.addLive(liveUrl);
 			},
 		});
 
@@ -628,10 +647,16 @@ async function runInteractive(): Promise<void> {
 		}
 
 		p.log.info(`${t.muted("csv saved to")} ${t.brand(outputPath)}`);
+		if (slackBuf) {
+			const { teachers, metadata } = result;
+			const duration = (metadata.durationMs / 1000).toFixed(1);
+			await slackBuf.finalizeSuccess(teachers.length, duration, outputPath);
+		}
 	} catch (err) {
 		spinner.stop(t.bad("scrape failed"));
 		const msg = err instanceof Error ? err.message : String(err);
 		p.log.error(msg);
+		if (slackBuf) await slackBuf.finalizeFailure(msg);
 		process.exit(1);
 	}
 
@@ -671,6 +696,7 @@ async function scrapeOne(
   outputPath: string,
   tag: string,
   preferredDirectoryUrls?: string[],
+  slackBuf?: SlackThreadBuffer | null,
 ): Promise<ScrapeResult> {
   const scrapeConfig: ScrapeConfig = {
     schoolUrl: url,
@@ -688,17 +714,20 @@ async function scrapeOne(
 			console.log(
 				`${t.muted(tag)} ${t.muted(`[${idx}/${total}]`)} ${t.bold(PHASE_LABELS[phase])}`,
 			);
+			slackBuf?.addPhase(PHASE_LABELS[phase]);
 		},
 		onMilestone: (msg, level) => {
       debug("MILESTONE", `${tag} [${level ?? "info"}] ${msg}`);
 			const prefix = level === "warn" ? t.warn("!") : t.ok("•");
 			console.log(`${t.muted(tag)} ${prefix} ${msg}`);
+			slackBuf?.addMilestone(msg, level);
 		},
 		onLiveUrl: (liveUrl) => {
 			debug("LIVE-URL", `${tag} ${liveUrl}`);
 			console.log(
 				`${t.muted(tag)} ${t.muted("watch live:")} ${t.brand(liveUrl)}`,
 			);
+			slackBuf?.addLive(liveUrl);
 		},
 	});
 }
@@ -708,6 +737,7 @@ async function runBatch(
   items: BatchItem[],
   concurrency: number,
   force: boolean,
+  slack?: SlackNotifier | null,
 ): Promise<BatchOutcome[]> {
 	const outcomes: BatchOutcome[] = new Array(items.length);
 	let cursor = 0;
@@ -719,11 +749,23 @@ async function runBatch(
 			const item = items[myIdx]!;
 			const tag = `[${myIdx + 1}/${items.length} ${item.slug}]`;
 			const start = Date.now();
+            let threadTs: string | null = null;
+            let buf: SlackThreadBuffer | null = null;
+            if (slack) {
+                try {
+                    threadTs = await slack.startThread(`▶️ Starting scrape: ${item.url} (${item.slug})`);
+                    if (threadTs) buf = new SlackThreadBuffer(slack, threadTs);
+                } catch {}
+                if (!threadTs) {
+                    console.log(t.warn(`! slack: unable to post to channel (${slack.getLastError() || "unknown error"}). Make sure the bot is invited and channel ID is correct.`));
+                }
+            }
 
 			if (!force && existsSync(item.outputPath)) {
 				console.log(
 					`${t.muted(tag)} ${t.muted("skipped (output exists — pass --force to re-scrape)")}`,
 				);
+				if (threadTs) slack?.postInThread(threadTs, `⏭️ Skipped (output exists).`).catch(() => {});
 				outcomes[myIdx] = {
 					item,
 					status: "skipped",
@@ -733,6 +775,7 @@ async function runBatch(
 			}
 
 			console.log(`${t.muted(tag)} ${t.bold("starting")} ${t.brand(item.url)}`);
+            // avoid mid-run Slack noise; only final summaries will be sent
 
 			// one-retry policy: browser-use sessions can drop or hit transient
 			// rate limits; a fresh retry resolves most of these. without this,
@@ -746,6 +789,7 @@ async function runBatch(
             item.outputPath,
             tag,
             item.preferredDirectoryUrls,
+            buf,
           );
 					// treat 0 teachers as a retry-eligible failure — it's almost always
 					// a transient scraper gave-up / browser-use flake, not a real
@@ -754,43 +798,47 @@ async function runBatch(
 						console.log(
 							`${t.muted(tag)} ${t.warn("! first attempt returned 0 teachers — retrying once")}`,
 						);
-						lastError = "0 teachers on first attempt";
-						continue;
-					}
-					result = r;
-					break;
-				} catch (err) {
-					lastError = err instanceof Error ? err.message : String(err);
-					if (attempt === 1) {
-						console.log(
-							`${t.muted(tag)} ${t.warn("! first attempt failed:")} ${lastError} ${t.muted("— retrying once")}`,
-						);
-					}
-				}
-			}
+                        buf?.markRetried();
+                        lastError = "0 teachers on first attempt";
+                        continue;
+                    }
+                    result = r;
+                    break;
+                } catch (err) {
+                    lastError = err instanceof Error ? err.message : String(err);
+                    if (attempt === 1) {
+                        console.log(
+                            `${t.muted(tag)} ${t.warn("! first attempt failed:")} ${lastError} ${t.muted("— retrying once")}`,
+                        );
+                        buf?.markRetried();
+                    }
+                }
+            }
 
-			if (result) {
-				const dur = ((Date.now() - start) / 1000).toFixed(1);
-				console.log(
-					`${t.muted(tag)} ${t.ok("✓ done")} ${t.accent(String(result.teachers.length))} ${t.muted("teachers")} ${t.muted(`(${dur}s)`)}`,
-				);
-				outcomes[myIdx] = {
-					item,
-					status: "ok",
-					result,
-					durationMs: Date.now() - start,
-				};
-			} else {
-				console.log(
-					`${t.muted(tag)} ${t.bad("✗ failed (after retry):")} ${lastError}`,
-				);
-				outcomes[myIdx] = {
-					item,
-					status: "failed",
-					error: lastError,
-					durationMs: Date.now() - start,
-				};
-			}
+            if (result) {
+                const dur = ((Date.now() - start) / 1000).toFixed(1);
+                console.log(
+                    `${t.muted(tag)} ${t.ok("✓ done")} ${t.accent(String(result.teachers.length))} ${t.muted("teachers")} ${t.muted(`(${dur}s)`)}`,
+                );
+                if (buf) await buf.finalizeSuccess(result.teachers.length, dur, item.outputPath);
+                outcomes[myIdx] = {
+                    item,
+                    status: "ok",
+                    result,
+                    durationMs: Date.now() - start,
+                };
+            } else {
+                console.log(
+                    `${t.muted(tag)} ${t.bad("✗ failed (after retry):")} ${lastError}`,
+                );
+                if (buf) await buf.finalizeFailure(`Failed after retry: ${lastError}`);
+                outcomes[myIdx] = {
+                    item,
+                    status: "failed",
+                    error: lastError,
+                    durationMs: Date.now() - start,
+                };
+            }
 		}
 	}
 
@@ -871,10 +919,12 @@ async function runNonInteractive(flags: CliFlags): Promise<void> {
 	}
 
 	const batchStart = Date.now();
+  const slack = createSlackFromEnv();
   const outcomes = await runBatch(
     items,
     flags.concurrency,
     flags.force,
+    slack,
   );
 	const batchDurationSec = ((Date.now() - batchStart) / 1000).toFixed(1);
 
@@ -1200,7 +1250,8 @@ async function runFromSchoolsCsv(flags: CliFlags): Promise<void> {
   }
 
   const batchStart = Date.now();
-  const outcomes = await runBatch(items, concurrency, flags.force);
+  const slack = createSlackFromEnv();
+  const outcomes = await runBatch(items, concurrency, flags.force, slack);
   const batchDurationSec = ((Date.now() - batchStart) / 1000).toFixed(1);
 
   // no merged output in CSV mode — per-city files only
