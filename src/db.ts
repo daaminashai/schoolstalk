@@ -20,9 +20,14 @@
 // the CSV on disk is still the durable record.
 
 import type { Teacher } from "./types";
+import { SQL } from "bun";
 
 let sqlPromise: Promise<any> | null = null;
 let warned = false;
+
+export function databaseConfigured(): boolean {
+  return !!process.env.DATABASE_URL?.trim();
+}
 
 async function getSql(): Promise<any | null> {
   const url = process.env.DATABASE_URL;
@@ -31,7 +36,7 @@ async function getSql(): Promise<any | null> {
 
   sqlPromise = (async () => {
     // Bun.sql is the project's blessed Postgres client (CLAUDE.md).
-    const sql = (Bun as any).sql(url);
+    const sql = new SQL(url);
     // Best-effort schema bootstrap — safe to run repeatedly.
     try {
       await sql`
@@ -69,7 +74,7 @@ export async function upsertTeachers(
   hsId: number | null,
   sourceUrl: string,
   teachers: Teacher[],
-): Promise<{ written: number } | null> {
+): Promise<{ ok: true; written: number } | { ok: false; written: 0; error: string } | null> {
   if (hsId == null || teachers.length === 0) return null;
 
   const sql = await getSql();
@@ -97,12 +102,11 @@ export async function upsertTeachers(
         email      = excluded.email,
         scraped_at = now()
     `;
-    return { written: rows.length };
+    return { ok: true, written: rows.length };
   } catch (err) {
     // DB failure must not kill the scrape — the CSV is the durable record.
-    console.warn(
-      `[db] upsert failed for hs_id=${hsId}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
+    const error = err instanceof Error ? err.message : String(err);
+    console.warn(`[db] upsert failed for hs_id=${hsId}: ${error}`);
+    return { ok: false, written: 0, error };
   }
 }

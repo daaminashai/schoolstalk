@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: schoolyank
+      POSTGRES_USER: schoolyank
+      POSTGRES_PASSWORD: schoolyank
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U schoolyank -d schoolyank" ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  app:
+    build: .
+    image: schoolyank:prod-ready
+    pull_policy: build
+    command: [ "--schools-csv", "/app/input/schools_with_staff_urls.csv", "-j", "25" ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://schoolyank:schoolyank@postgres:5432/schoolyank
+      REQUIRE_DATABASE: "true"
+      LOG_FILE: /app/logs/schoolyank.log
+      STATUS_CSV_PATH: /app/output/status.csv
+      SCHOOLYANK_INPUT_CSV: /app/input/schools_with_staff_urls.csv
+    volumes:
+      - ./schools_with_staff_urls.csv:/app/input/schools_with_staff_urls.csv:ro
+      - ./output:/app/output
+      - ./schools:/app/schools
+      - ./logs:/app/logs
+
+volumes:
+  postgres-data:

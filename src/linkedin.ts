@@ -730,7 +730,7 @@ async function enrichViaExaBatched(
       teacher: {
         firstName: teacher.firstName,
         lastName: teacher.lastName,
-        schoolName: teacher.schoolName,
+        schoolName: teacher.schoolName ?? null,
         districtName: fallbackContext || null,
         role: teacher.role,
       },

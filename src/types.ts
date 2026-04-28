@@ -7,6 +7,8 @@ export interface Teacher {
   role: string;
   department: string | null;
   linkedinUrl: string | null;
+  schoolName?: string | null;
+  schoolNcesId?: string | null;
   sources: DataSource[];
   confidence: ConfidenceScore;
   // 1-5 affinity for Hack Club values (project-based CS / maker / engineering).

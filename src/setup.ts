@@ -9,6 +9,7 @@
 
 import * as p from "@clack/prompts";
 import color from "picocolors";
+import OpenAI from "openai";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { z } from "zod";
@@ -254,7 +255,7 @@ async function solveChallenge(
 
   const lines = raw
     .split(/\r?\n/)
-    .map((l) => l.trim())
+    .map((l: string) => l.trim())
     .filter(Boolean);
   const lastLine = lines.at(-1) ?? raw;
   const lastToken = lastLine.split(/\s+/).pop() ?? lastLine;

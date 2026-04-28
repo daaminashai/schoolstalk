@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { debug, debugBlock, isDebug } from "./debug";
+import { retryOnRateLimit } from "./retry";
 
 export interface SessionInfo {
   id: string;
@@ -267,7 +268,13 @@ export async function runTask(
   const taskStart = Date.now();
 
   try {
-    const output = await session.run(prompt, { model, onMessage });
+    const output = await retryOnRateLimit(
+      () => session.run(prompt, { model, onMessage }),
+      {
+        label: "browser-use task",
+        onRetry: onMessage,
+      },
+    );
     const text = coerceOutput(output);
     debugBlock("BROWSER", `runTask done · ${((Date.now() - taskStart) / 1000).toFixed(2)}s`, text);
     return text;
@@ -294,7 +301,13 @@ export async function runTaskStructured<T extends z.ZodType>(
 
   try {
     const jsonSchema = z.toJSONSchema(schema);
-    const output = await session.run(prompt, { schema: jsonSchema, model, onMessage });
+    const output = await retryOnRateLimit(
+      () => session.run(prompt, { schema: jsonSchema, model, onMessage }),
+      {
+        label: "browser-use structured task",
+        onRetry: onMessage,
+      },
+    );
     const parsed = schema.parse(output);
     debug("BROWSER", `runTaskStructured done · ${((Date.now() - taskStart) / 1000).toFixed(2)}s`, parsed);
     return parsed as z.output<T>;

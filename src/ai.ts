@@ -1,7 +1,8 @@
 // ── thin wrapper around OpenRouter's OpenAI-compatible endpoint ──
 
 import OpenAI from "openai";
-import { debug, debugBlock, isDebug } from "./debug";
+import { debug, debugBlock, debugWarn, isDebug } from "./debug";
+import { retryOnRateLimit } from "./retry";
 import {
   getOpenRouterApiKey,
   getOpenRouterBaseUrl,
@@ -46,13 +47,19 @@ export async function ask(system: string, user: string): Promise<string> {
     debugBlock("AI", "user prompt", user);
   }
   const start = Date.now();
-  const res = await ai.chat.completions.create({
-    model,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-  });
+  const res = await retryOnRateLimit(
+    () => ai.chat.completions.create({
+      model,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    }),
+    {
+      label: "OpenRouter chat completion",
+      onRetry: (msg) => debugWarn("AI", msg),
+    },
+  );
 
   const content = res.choices[0]?.message?.content ?? "";
   debugBlock("AI", `response · ${((Date.now() - start) / 1000).toFixed(2)}s`, content);

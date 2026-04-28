@@ -17,7 +17,7 @@ import { validateEmailsBatched } from "./emailValidator";
 import { generateCsv, writeCsv } from "./csv";
 import { extractDomain } from "./utils";
 import { debug } from "./debug";
-import { upsertTeachers } from "./db";
+import { databaseConfigured, upsertTeachers } from "./db";
 import {
   lookupDistrict,
   lookupSchoolsInDistrict,
@@ -271,7 +271,14 @@ export async function run(
   // not abort — the CSV on disk is the durable record.
   if (config.hsId != null) {
     const dbResult = await upsertTeachers(config.hsId, config.schoolUrl, teachers);
-    if (dbResult) log(`db: upserted ${dbResult.written} teachers`);
+    if (dbResult?.ok) {
+      log(`db: upserted ${dbResult.written} teachers`);
+    } else if (dbResult && !dbResult.ok) {
+      warnings.push(`Postgres export failed: ${dbResult.error}`);
+      milestone(`Postgres export failed: ${dbResult.error}`, "warn");
+    }
+  } else if (databaseConfigured()) {
+    milestone("Postgres export skipped: hsId is missing for this input", "warn");
   }
 
   debug("ORCH", `run() complete · ${((Date.now() - startTime) / 1000).toFixed(2)}s · ${teachers.length} teachers, ${warnings.length} warnings`, {
@@ -323,7 +330,7 @@ async function resolveSingleSchool(
   // whether an NCES candidate actually refers to THIS school — private schools
   // in particular get spuriously matched to same-state public schools with
   // no shared city, and those matches pollute every output field.
-  const scrapedAddress = parseAddress(siteInfo.address);
+  const scrapedAddress = parseAddress(siteInfo.address ?? null);
   const scrapedCity = scrapedAddress?.city?.toLowerCase().trim() || null;
   const scrapedZip = scrapedAddress?.zip?.replace(/[^0-9]/g, "").slice(0, 5) || null;
   const scrapedStreetNum = scrapedAddress?.street?.match(/^\d+/)?.[0] ?? null;
@@ -422,7 +429,7 @@ async function resolveDistrict(
   let districtAddressFromNces: Address | null = null;
 
   if (state && siteInfo.name) {
-    const scrapedAddr = parseAddress(siteInfo.address);
+    const scrapedAddr = parseAddress(siteInfo.address ?? null);
     const d = await lookupDistrict(siteInfo.name, state, scrapedAddr?.city ?? undefined);
     if (d) {
       leaid = d.leaid;
@@ -485,7 +492,7 @@ async function resolveDistrict(
       name: normalizeDistrictName(siteInfo.name) || "Unknown District",
       leaId: null,
       url: schoolUrl,
-      officeAddress: parseAddress(siteInfo.address),
+      officeAddress: parseAddress(siteInfo.address ?? null),
       officePhone: null,
     };
 
@@ -643,7 +650,7 @@ async function resolveDistrict(
     siteInfo.name ??
     "Unknown District";
 
-  const scrapedAddress = parseAddress(siteInfo.address);
+  const scrapedAddress = parseAddress(siteInfo.address ?? null);
 
   const district: DistrictInfo = {
     name: normalizeDistrictName(rawDistrictName) || "Unknown District",
