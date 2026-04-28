@@ -20,7 +20,7 @@ services:
     build: .
     image: schoolyank:prod-ready
     pull_policy: build
-    command: [ "--schools-csv", "/app/input/schools_with_staff_urls.csv", "-j", "25" ]
+    command: [ "--schools-csv", "/app/input/schools_with_staff_urls.csv", "-j", "50" ]
     depends_on:
       postgres:
         condition: service_healthy
