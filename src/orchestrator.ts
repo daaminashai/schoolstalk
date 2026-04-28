@@ -30,17 +30,10 @@ import {
 import { normalizeDistrictName, normalizeSchoolName } from "./names";
 
 // ── progress phase model ─────────────────────────────────────────────────────
-// each phase renders as "[i/N] label" in the spinner. only phases that actually
-// run are counted — linkedin is skipped in the total when disabled.
-export type PhaseId =
-  | "classify"
-  | "directory"
-  | "extract"
-  | "export";
+// each phase renders as "[i/N] label" in the spinner.
+export type PhaseId = "extract" | "export";
 
 export const PHASE_LABELS: Record<PhaseId, string> = {
-  classify: "classifying site",
-  directory: "finding staff directory",
   extract: "extracting teachers",
   export: "writing CSV",
 };
@@ -73,15 +66,10 @@ export async function run(
 
   debug("ORCH", `run() start`, config);
 
-  // the classify + directory + extract tasks all run inside scrapeSchool. we
-  // still model them as distinct phases so the ui shows meaningful progress
-  // while the scraper thinks.
-  const totalPhases = 4;
+  const totalPhases = 2;
   const phaseIndex: Record<PhaseId, number> = {
-    classify: 1,
-    directory: 2,
-    extract: 3,
-    export: 4,
+    extract: 1,
+    export: 2,
   };
 
   let currentPhase: PhaseId | null = null;
@@ -91,22 +79,17 @@ export async function run(
     onPhase(phase, phaseIndex[phase], totalPhases);
   }
 
-  // ── scraping (phases 1-3: classify, directory, extract) ──
-  // the scraper drives these subphases itself and calls onScraperPhase at each
-  // boundary. we listen for that callback to advance our phase indicator —
-  // substring-matching agent messages was unreliable (agent reasoning could
-  // mention "extracting STEM teachers" mid-task-2, causing premature jumps).
-  enterPhase("classify");
+  // ── scraping ──
+  enterPhase("extract");
 
   const scrapeResult = await scrapeSchool(config.schoolUrl, {
     onStatus: log,
     onMilestone: milestone,
     onLiveUrl,
+    schoolName: config.schoolName,
     preferredDirectoryUrls: config.preferredDirectoryUrls,
     onScraperPhase: (phase) => {
-      if (phase === "classify") enterPhase("classify");
-      else if (phase === "directory") enterPhase("directory");
-      else if (phase === "extract") enterPhase("extract");
+      if (phase === "extract") enterPhase("extract");
     },
   });
 
@@ -136,6 +119,7 @@ export async function run(
     const { district, schools } = await resolveSites(
       scrapeResult.siteInfo,
       config.schoolUrl,
+      config.schoolName ?? null,
       state,
       teachers,
       log,
@@ -304,13 +288,14 @@ export async function run(
 async function resolveSites(
   siteInfo: RawSiteInfo,
   schoolUrl: string,
+  schoolName: string | null,
   state: string | null,
   teachers: Teacher[],
   log: (msg: string) => void,
   warnings: string[],
 ): Promise<{ district: DistrictInfo | null; schools: SchoolInfo[] }> {
   // Single-school only — district flow removed
-  return resolveSingleSchool(siteInfo, schoolUrl, state, log, warnings);
+  return resolveSingleSchool(siteInfo, schoolUrl, schoolName, state, log, warnings);
 }
 
 /**
@@ -321,12 +306,13 @@ async function resolveSites(
 async function resolveSingleSchool(
   siteInfo: RawSiteInfo,
   schoolUrl: string,
+  schoolName: string | null,
   state: string | null,
   log: (msg: string) => void,
   warnings: string[],
 ): Promise<{ district: DistrictInfo | null; schools: SchoolInfo[] }> {
   const nameForSearch =
-    siteInfo.name ?? extractSchoolNameFromUrl(schoolUrl) ?? "";
+    schoolName ?? siteInfo.name ?? extractSchoolNameFromUrl(schoolUrl) ?? "";
 
   // scrape-side ground truth: parse the address the classifier pulled off the
   // school's own footer/contact page. this is the authoritative signal for

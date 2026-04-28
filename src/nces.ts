@@ -2,7 +2,6 @@
 
 import type { Address, NCESDistrictRecord, NCESSchoolRecord } from "./types";
 import { debug, debugWarn } from "./debug";
-import { askJson } from "./ai";
 
 const PRIMARY_HOST = "https://educationdata.urban.org";
 // urban institute's prod api occasionally hangs post-tls (see prod issue #123 on
@@ -152,29 +151,14 @@ export async function lookupDistrict(
   }
   if (roster.length === 0) return null;
 
-  // primary path: ask the LLM to pick the best LEA. handles umbrella-vs-operating
-  // entity disambiguation (VT supervisory districts, NY/CO BOCES, PA IUs),
-  // abbreviation expansion, and acronym matching in one shot — replaced ~100
-  // lines of hand-rolled tokenizing/levenshtein scoring that would silently
-  // pick empty umbrella districts over their real counterparts.
-  const llmPick = await matchDistrictWithLLM(districtName, state, scrapedCity, roster);
-  if (llmPick) return llmPick;
-
-  // llm couldn't find a match with confidence — fall back to fuzzy scoring.
-  // kept as a safety net: if the LLM backend is down or returns malformed
-  // output, we still get the legacy behavior instead of a hard failure.
-  debug("NCES", `lookupDistrict · LLM returned no match, falling back to fuzzy scoring`);
   const fuzzy = fuzzyMatchDistrict(districtName, roster);
   if (fuzzy) {
-    debug("NCES", `lookupDistrict · fuzzy fallback picked "${fuzzy.lea_name}"`);
+    debug("NCES", `lookupDistrict · fuzzy picked "${fuzzy.lea_name}"`);
     return fuzzy;
   }
 
-  // last-resort fallback: if both the LLM and fuzzy matcher came up empty but
-  // we have a scraped city, try the most closely-named LEA headquartered in
-  // that city. catches colloquial names like "Jeffco" → "Jefferson County R-1"
-  // where only the city (Golden) links the two. the LLM already sees the city
-  // in the primary prompt, so this only fires when the LLM call itself failed.
+  // last-resort fallback: if fuzzy matching comes up empty but we have a
+  // scraped city, try the most closely-named LEA headquartered in that city.
   if (scrapedCity) {
     const qNorm = normalize(districtName);
     const cityNorm = scrapedCity.trim().toLowerCase();
@@ -206,140 +190,9 @@ export async function lookupDistrict(
   return null;
 }
 
-// per-district LLM cache keyed by scraped-name + state + city. pipelines often
-// resolve the same district multiple times (seed + orchestrator + umbrella
-// routing) — one LLM call per (name, state, city) is plenty.
-const llmDistrictCache = new Map<string, NCESDistrictRecord | null>();
-
 /**
- * asks the LLM to pick the single best-matching LEA record from a state's
- * full district roster. returns null when the LLM declines or errors —
- * callers should treat null as "fall back to heuristic matching".
- *
- * we use the LLM here (not fuzzy scoring) because the hand-rolled token /
- * levenshtein / acronym rules silently pick empty administrative umbrellas
- * over the real operating district when their names are char-distance-closer
- * (e.g. "Champlain Valley Supervisory District" beating "Champlain Valley
- * Unified Union School District #56"). the LLM handles that class of
- * ambiguity semantically in one shot.
- */
-async function matchDistrictWithLLM(
-  scrapedDistrictName: string,
-  state: string,
-  scrapedCity: string | undefined,
-  roster: NCESDistrictRecord[],
-): Promise<NCESDistrictRecord | null> {
-  const cacheKey = `${scrapedDistrictName}::${state}::${scrapedCity ?? ""}`;
-  if (llmDistrictCache.has(cacheKey)) {
-    const cached = llmDistrictCache.get(cacheKey) ?? null;
-    debug("NCES", `lookupDistrict · LLM cache hit "${cached?.lea_name ?? "(none)"}"`);
-    return cached;
-  }
-
-  // compact candidate shape — LLM only needs enough to disambiguate. city
-  // goes in because VT supervisory districts share names with their operating
-  // counterparts, and "unified"/"consolidated"/"supervisory" tokens matter
-  // for umbrella vs operating distinction.
-  const candidates = roster.map((r, i) => ({
-    i,
-    name: r.lea_name,
-    city: r.city_location || r.city_mailing || null,
-  }));
-
-  const system = [
-    "You match a scraped US school district name to the correct federal NCES LEA record.",
-    "Given a scraped district name, its US state, an optional city, and a list of candidate LEA records from that state, pick the single LEA that best matches the scraped name.",
-    "",
-    "## Background on US school district naming",
-    "",
-    "Districts (LEAs — Local Education Agencies) in the NCES roster are not uniform across states. Each state has its own conventions. The scraped name usually comes from a district website and may be abbreviated, acronymized, or use a colloquial form.",
-    "",
-    "**Operating districts** directly enroll students and run schools. These are what you usually want:",
-    "- Generic: \"<name> School District\", \"<name> Public Schools\", \"<name> Community Schools\", \"<name> Schools\"",
-    "- Texas: \"<name> Independent School District\" (ISD). \"Austin ISD\" = \"Austin Independent School District\".",
-    "- California: \"<name> Unified School District\" (USD), \"<name> Union High School District\", \"<name> Elementary School District\". Some cities have separate elementary and high school districts covering the same geography.",
-    "- Illinois / Colorado / other western states: numbered districts like \"<Name> School District 20\", \"<Place> Community Unit School District 200\", \"<Place> R-1\" / \"R-2\". The number is part of the identifier.",
-    "- Vermont / New England: \"<name> Unified Union School District\" or \"<name> School District #<n>\" are the real operating entities.",
-    "- Township/County systems (NJ, PA, IN, MD, FL, NV, NC, VA): \"<name> Township Public Schools\", \"<name> County Public Schools\", \"<name> County School District\".",
-    "- NYC: \"New York City Geographic District #<n>\" or \"New York City Chancellor's Office\"; most city schools roll up under these.",
-    "",
-    "**Administrative umbrella / service agencies** are intermediate units between the state and operating districts. They provide shared services (special ed, transportation, professional development, sometimes career/technical programs) but usually do not enroll regular K-12 students themselves. In the roster these often have zero or a very small number of schools. Unless the scraped name specifically names the umbrella, prefer the operating district over the umbrella:",
-    "- Vermont / New Hampshire: \"<name> Supervisory Union\" / \"<name> Supervisory District\" — umbrellas over the real Unified Union operating districts.",
-    "- New York: \"<name> BOCES\" (Board of Cooperative Educational Services) — regional service agency, not a K-12 district.",
-    "- Pennsylvania: \"<name> IU\" / \"<name> Intermediate Unit\" — numbered regional service agency.",
-    "- Colorado / Oregon / Washington / others: \"BOCES\", \"ESD\" (Education Service District), \"ESA\" (Education Service Agency).",
-    "- Iowa / Minnesota / Wisconsin: \"AEA\" (Area Education Agency), \"CESA\" (Cooperative Educational Service Agency).",
-    "- Michigan: \"ISD\" here means \"Intermediate School District\" — the umbrella service agency, NOT an operating district. (Confusingly, Texas \"ISD\" means the operating district.)",
-    "- Anything with \"Cooperative\", \"Consortium\", \"Regional Service\", \"Joint Powers\", \"Educational Cooperative\" in the name is almost always an umbrella.",
-    "",
-    "**Acronym conventions** you will commonly see in scraped names:",
-    "- \"CVSD\" → \"Champlain Valley School District\" (VT), \"Central Valley School District\" (WA/PA), etc. — context dependent.",
-    "- \"LAUSD\" → \"Los Angeles Unified School District\".",
-    "- \"DCPS\" → \"District of Columbia Public Schools\" / \"Duval County Public Schools\" (FL) / \"Detroit Community Public Schools\".",
-    "- \"MCPS\" → \"Montgomery County Public Schools\" (MD) / \"Manchester Community Public Schools\" etc.",
-    "- \"NYCDOE\" → the NYC Chancellor's Office umbrella.",
-    "- \"R-1\", \"R-2\", \"RE-1J\", \"C-1\" suffixes (CO, MO) are structural designations — part of the real name.",
-    "",
-    "**Common name substitutions**: \"Hts\" = \"Heights\", \"Mt\" = \"Mount\", \"St\" = \"Saint\", \"Ft\" = \"Fort\", \"Twp\" = \"Township\". Remove trailing \"School District\" / \"Public Schools\" / \"ISD\" / \"USD\" when comparing the distinctive part.",
-    "",
-    "## Rules",
-    "",
-    "1. Prefer the operating K-12 district over an administrative umbrella unless the scraped name specifically identifies the umbrella.",
-    "2. When the scraped name matches multiple operating candidates (e.g. California elementary vs unified vs union high), use the provided city and the scraped name's grade-level hints (\"Elementary\", \"Unified\", \"Union High\") to disambiguate.",
-    "3. Numbered suffixes (\"#56\", \"District 20\", \"R-1\") are part of the identifier — don't ignore them, but also don't reject a match just because the scraped name omits the number.",
-    "4. If nothing in the roster matches with reasonable confidence, return null. A wrong match is worse than no match — downstream code falls back to scraped addresses when we return null.",
-    "",
-    "## Output",
-    "",
-    "Respond with JSON: { \"index\": <number or null>, \"reason\": \"one short sentence explaining the pick or the rejection\" }",
-    "The index must be one of the candidate \"i\" values, or null.",
-  ].join("\n");
-
-  const user = JSON.stringify(
-    {
-      scraped_district_name: scrapedDistrictName,
-      state,
-      scraped_city: scrapedCity ?? null,
-      candidates,
-    },
-    null,
-    2,
-  );
-
-  try {
-    const res = await askJson<{ index: number | null; reason?: string }>(system, user);
-    if (res.index == null) {
-      debug("NCES", `lookupDistrict · LLM declined: ${res.reason ?? "(no reason)"}`);
-      llmDistrictCache.set(cacheKey, null);
-      return null;
-    }
-    const picked = roster[res.index];
-    if (!picked) {
-      // LLM returned an index outside the candidate list — reject and let the
-      // heuristic fallback take over rather than trust a hallucinated record.
-      debugWarn("NCES", `lookupDistrict · LLM returned invalid index ${res.index} (roster size ${roster.length})`);
-      llmDistrictCache.set(cacheKey, null);
-      return null;
-    }
-    debug(
-      "NCES",
-      `lookupDistrict · LLM picked "${picked.lea_name}" (LEA ${picked.leaid}) · ${res.reason ?? "(no reason)"}`,
-    );
-    llmDistrictCache.set(cacheKey, picked);
-    return picked;
-  } catch (err) {
-    debugWarn("NCES", `lookupDistrict · LLM call failed`, {
-      err: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-}
-
-/**
- * legacy fuzzy matcher — kept as a safety net when the LLM is unavailable.
- * this is the matcher that existed before the LLM path; it picks empty umbrella
- * LEAs over operating districts when their names score closer by edit distance,
- * so prefer the LLM path when possible.
+ * deterministic district matcher. this is less semantically capable than the
+ * removed LLM path, but it is cheap, predictable, and token-free.
  */
 function fuzzyMatchDistrict(
   districtName: string,

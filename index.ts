@@ -169,7 +169,7 @@ function parseArgs(argv: string[]): CliFlags {
     urlsFile: null,
     output: null,
     mergedOutput: null,
-    concurrency: 50,
+    concurrency: 6,
     force: false,
     help: false,
     interactive: false,
@@ -288,7 +288,7 @@ function printHelp(): void {
     `${t.bold("USAGE")}`,
     `  ${bin}                        ${t.muted("interactive prompt (single school)")}`,
     `  ${bin} <url>                  ${t.muted("scrape one school non-interactively")}`,
-    `  ${bin} <url1> <url2> ...      ${t.muted("batch (3-way parallel by default)")}`,
+    `  ${bin} <url1> <url2> ...      ${t.muted("batch (6-way parallel by default)")}`,
     `  ${bin} --urls-file urls.txt   ${t.muted("batch from a file, one url per line")}`,
     `  ${bin} --schools-csv schools_with_staff_urls.csv ${t.muted("batch from unified CSV → schools/{STATE}/{city}/{id}.csv")}`,
     `  ${bin} @schools_with_staff_urls.csv ${t.muted("shorthand for --schools-csv schools_with_staff_urls.csv")}`,
@@ -730,6 +730,7 @@ async function scrapeOne(
   url: string,
   outputPath: string,
   tag: string,
+  schoolName?: string,
   preferredDirectoryUrls?: string[],
   hsId?: number,
   slackBuf?: SlackThreadBuffer | null,
@@ -737,6 +738,7 @@ async function scrapeOne(
   const scrapeConfig: ScrapeConfig = {
     schoolUrl: url,
     outputPath,
+    ...(schoolName ? { schoolName } : {}),
     ...(preferredDirectoryUrls && preferredDirectoryUrls.length > 0
       ? { preferredDirectoryUrls }
       : {}),
@@ -841,6 +843,7 @@ async function runBatch(
             item.url,
             item.outputPath,
             tag,
+            item.schoolName,
             item.preferredDirectoryUrls,
             item.hsId,
             buf,

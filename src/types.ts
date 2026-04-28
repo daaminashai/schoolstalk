@@ -122,6 +122,11 @@ export interface ScrapeConfig {
   schoolUrl: string;
   outputPath: string;
   /**
+   * Optional known school name from upstream data. When present, the runtime
+   * uses this instead of paying for a browser-agent classification pass.
+   */
+  schoolName?: string;
+  /**
    * Optional: pre-seeded staff directory URLs to try in order before running
    * the generic directory-discovery step. Typically sourced from staff_urls.csv
    * when running in --schools-csv mode. If none of these yield teachers, the
