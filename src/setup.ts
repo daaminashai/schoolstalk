@@ -44,7 +44,6 @@ const t = {
 /** required keys for the scraper to run. EXA is optional (linkedin fallback). */
 export function missingRequiredEnv(): string[] {
   const missing: string[] = [];
-  if (!process.env.BROWSER_USE_API_KEY?.trim()) missing.push("BROWSER_USE_API_KEY");
   if (!getOpenRouterApiKey()) missing.push("OPENROUTER_API_KEY");
   return missing;
 }
