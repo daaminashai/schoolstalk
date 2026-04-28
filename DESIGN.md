@@ -286,7 +286,7 @@ schoolyank/
 ├── index.ts              # cli entrypoint (clack/prompts)
 ├── src/
 │   ├── orchestrator.ts   # coordinates all phases
-│   ├── browser.ts        # browser-use sdk client setup
+│   ├── browser.ts        # local browser-use process wrapper
 │   ├── scraper.ts        # phase 1: school website scraping
 │   ├── nces.ts           # phase 2: nces/urban institute api
 │   ├── linkedin.ts       # phase 3: linkedin enrichment
@@ -295,7 +295,7 @@ schoolyank/
 │   ├── types.ts          # shared types
 │   └── utils.ts          # helpers (fuzzy match, url parsing)
 ├── output/               # generated csv files
-├── .env                  # BROWSER_USE_API_KEY
+├── .env                  # AI_BASE_URL, AI_MODEL, AI_API_KEY
 ├── package.json
 └── DESIGN.md             # this file
 ```

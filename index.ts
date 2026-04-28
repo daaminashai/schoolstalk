@@ -20,7 +20,6 @@ import { missingRequiredEnv, runSetupWizard } from "./src/setup";
 import { createClient, killActiveSessions } from "./src/browser";
 import { debug } from "./src/debug";
 import { createSlackFromEnv, SlackNotifier, SlackThreadBuffer } from "./src/slack";
-import { claim, release, describeOwner, installCleanupHandlers } from "./src/lock";
 import type { ScrapeConfig, ScrapeResult, Teacher } from "./src/types";
 import os from "node:os";
 
@@ -278,7 +277,7 @@ function printHelp(): void {
     `${t.bold("FLAGS")}`,
     `  ${t.brand("--url")} <x>              add a url (repeatable)`,
     `  ${t.brand("--urls-file")} <path>     read urls from a file (one per line, # for comments)`,
-    `  ${t.brand("--schools-csv")} <path>   read schools from unified CSV (expects: Hs ID, Name, State, City, School Homepage, Primary URL, Candidate 1..3)`,
+    `  ${t.brand("--schools-csv")} <path>   read schools from CSV (expects: Hs ID, Name, State, City, School Homepage, Primary URL, Candidate 1..3)`,
     `  ${t.brand("--output, -o")} <path>    single-url output csv path (default: output/<slug>.csv)`,
     `  ${t.brand("--merged-output")} <path> batch merged csv path (default: output/all.csv)`,
     `  ${t.brand("--concurrency, -j")} <n>  parallel workers (higher = faster; risk of rate limits)`,
@@ -672,8 +671,6 @@ interface BatchItem {
     slug: string;
     /** Optional pre-seeded staff directory URLs to try first */
     preferredDirectoryUrls?: string[];
-    /** high_schools.id, set in --schools-csv mode for DB upsert */
-    hsId?: number;
 }
 
 interface BatchOutcome {
@@ -700,7 +697,6 @@ async function scrapeOne(
   tag: string,
   preferredDirectoryUrls?: string[],
   slackBuf?: SlackThreadBuffer | null,
-  hsId?: number,
 ): Promise<ScrapeResult> {
   const scrapeConfig: ScrapeConfig = {
     schoolUrl: url,
@@ -708,7 +704,6 @@ async function scrapeOne(
     ...(preferredDirectoryUrls && preferredDirectoryUrls.length > 0
       ? { preferredDirectoryUrls }
       : {}),
-    ...(hsId != null ? { hsId } : {}),
   };
 	return run(scrapeConfig, {
 		onStatus: (msg) => {
@@ -744,11 +739,6 @@ async function runBatch(
   force: boolean,
   slack?: SlackNotifier | null,
 ): Promise<BatchOutcome[]> {
-	// release any locks held by this process if the user ctrl-c's or the
-	// process crashes — otherwise other workers / future runs would have to
-	// wait out the stale-lock timeout before retrying.
-	installCleanupHandlers();
-
 	const outcomes: BatchOutcome[] = new Array(items.length);
 	let cursor = 0;
 
@@ -771,8 +761,7 @@ async function runBatch(
                 }
             }
 
-			const claimResult = claim(item.outputPath, force);
-			if (claimResult.kind === "done") {
+			if (!force && existsSync(item.outputPath)) {
 				console.log(
 					`${t.muted(tag)} ${t.muted("skipped (output exists — pass --force to re-scrape)")}`,
 				);
@@ -784,24 +773,6 @@ async function runBatch(
 				};
 				continue;
 			}
-			if (claimResult.kind === "in_progress") {
-				const owner = describeOwner(item.outputPath) ?? "unknown owner";
-				console.log(
-					`${t.muted(tag)} ${t.muted(`skipped (locked by another worker · ${owner})`)}`,
-				);
-				if (threadTs) slack?.postInThread(threadTs, `⏭️ Skipped (locked by another worker).`).catch(() => {});
-				outcomes[myIdx] = {
-					item,
-					status: "skipped",
-					durationMs: Date.now() - start,
-				};
-				continue;
-			}
-			if (claimResult.kind === "stale_reclaimed") {
-				console.log(
-					`${t.muted(tag)} ${t.warn("⚠ stale lock reclaimed — previous run crashed mid-scrape")}`,
-				);
-			}
 
 			console.log(`${t.muted(tag)} ${t.bold("starting")} ${t.brand(item.url)}`);
             // avoid mid-run Slack noise; only final summaries will be sent
@@ -811,72 +782,63 @@ async function runBatch(
 			// ~5-10% of a 15-school batch would silently fail on a judge's test.
 			let result: ScrapeResult | null = null;
 			let lastError = "";
-			try {
-				for (let attempt = 1; attempt <= 2; attempt++) {
-					try {
-			  const r = await scrapeOne(
-				item.url,
-				item.outputPath,
-				tag,
-				item.preferredDirectoryUrls,
-				buf,
-				item.hsId,
-			  );
-						// treat 0 teachers as a retry-eligible failure — it's almost always
-						// a transient scraper gave-up / browser-use flake, not a real
-						// empty district. a real empty district is vanishingly rare.
-						if (r.teachers.length === 0 && attempt === 1) {
-							console.log(
-								`${t.muted(tag)} ${t.warn("! first attempt returned 0 teachers — retrying once")}`,
-							);
-							buf?.markRetried();
-							lastError = "0 teachers on first attempt";
-							continue;
-						}
-						result = r;
-						break;
-					} catch (err) {
-						lastError = err instanceof Error ? err.message : String(err);
-						if (attempt === 1) {
-							console.log(
-								`${t.muted(tag)} ${t.warn("! first attempt failed:")} ${lastError} ${t.muted("— retrying once")}`,
-							);
-							buf?.markRetried();
-						}
-					}
-				}
+			for (let attempt = 1; attempt <= 2; attempt++) {
+				try {
+          const r = await scrapeOne(
+            item.url,
+            item.outputPath,
+            tag,
+            item.preferredDirectoryUrls,
+            buf,
+          );
+					// treat 0 teachers as a retry-eligible failure — it's almost always
+					// a transient scraper gave-up / browser-use flake, not a real
+					// empty district. a real empty district is vanishingly rare.
+					if (r.teachers.length === 0 && attempt === 1) {
+						console.log(
+							`${t.muted(tag)} ${t.warn("! first attempt returned 0 teachers — retrying once")}`,
+						);
+                        buf?.markRetried();
+                        lastError = "0 teachers on first attempt";
+                        continue;
+                    }
+                    result = r;
+                    break;
+                } catch (err) {
+                    lastError = err instanceof Error ? err.message : String(err);
+                    if (attempt === 1) {
+                        console.log(
+                            `${t.muted(tag)} ${t.warn("! first attempt failed:")} ${lastError} ${t.muted("— retrying once")}`,
+                        );
+                        buf?.markRetried();
+                    }
+                }
+            }
 
-				if (result) {
-					const dur = ((Date.now() - start) / 1000).toFixed(1);
-					console.log(
-						`${t.muted(tag)} ${t.ok("✓ done")} ${t.accent(String(result.teachers.length))} ${t.muted("teachers")} ${t.muted(`(${dur}s)`)}`,
-					);
-					if (buf) await buf.finalizeSuccess(result.teachers.length, dur, item.outputPath);
-					outcomes[myIdx] = {
-						item,
-						status: "ok",
-						result,
-						durationMs: Date.now() - start,
-					};
-				} else {
-					console.log(
-						`${t.muted(tag)} ${t.bad("✗ failed (after retry):")} ${lastError}`,
-					);
-					if (buf) await buf.finalizeFailure(`Failed after retry: ${lastError}`);
-					outcomes[myIdx] = {
-						item,
-						status: "failed",
-						error: lastError,
-						durationMs: Date.now() - start,
-					};
-				}
-			} finally {
-				// always release the lock — success, failure, or thrown. On success
-				// the CSV at outputPath is the durable record; on failure we want a
-				// future run (or a parallel worker) to be able to retry the school
-				// without waiting for the stale-lock timeout.
-				release(item.outputPath);
-			}
+            if (result) {
+                const dur = ((Date.now() - start) / 1000).toFixed(1);
+                console.log(
+                    `${t.muted(tag)} ${t.ok("✓ done")} ${t.accent(String(result.teachers.length))} ${t.muted("teachers")} ${t.muted(`(${dur}s)`)}`,
+                );
+                if (buf) await buf.finalizeSuccess(result.teachers.length, dur, item.outputPath);
+                outcomes[myIdx] = {
+                    item,
+                    status: "ok",
+                    result,
+                    durationMs: Date.now() - start,
+                };
+            } else {
+                console.log(
+                    `${t.muted(tag)} ${t.bad("✗ failed (after retry):")} ${lastError}`,
+                );
+                if (buf) await buf.finalizeFailure(`Failed after retry: ${lastError}`);
+                outcomes[myIdx] = {
+                    item,
+                    status: "failed",
+                    error: lastError,
+                    durationMs: Date.now() - start,
+                };
+            }
 		}
 	}
 
@@ -939,10 +901,8 @@ async function runNonInteractive(flags: CliFlags): Promise<void> {
 	);
   // linkedin removed
 
-	// clear any lingering browser-use sessions from previous runs before we
-	// spawn ours. the free tier caps at 3 concurrent sessions project-wide,
-	// and an aborted run can leave sessions active past their idle timeout
-	// — which would make the first createSession() of this run fail.
+	// local browser-use sessions are process-owned; this is a no-op unless a
+	// caller reused a client and left local child processes open.
 	try {
 		const killed = await killActiveSessions(createClient());
 		if (killed > 0)
@@ -1017,9 +977,9 @@ async function main(): Promise<void> {
 	}
 
 	// preflight: if the required keys aren't set, walk the user through the
-	// full interactive setup wizard. handles LLM provider selection, browser-use
-	// signup via their public challenge api, and (optionally) Exa signup via a
-	// temp email. at the end, .env is written and the scrape proceeds normally.
+	// full interactive setup wizard. handles LLM provider selection and
+	// optionally Exa signup through the local browser-use runner. at the end,
+	// .env is written and the scrape proceeds normally.
 	if (missingRequiredEnv().length > 0) {
 		try {
 			await runSetupWizard();
@@ -1027,7 +987,7 @@ async function main(): Promise<void> {
 			const msg = err instanceof Error ? err.message : String(err);
 			console.error(`${t.bad("✗ setup failed:")} ${msg}`);
       console.error(
-        `\n${t.muted("you can manually populate .env and rerun. required keys:")}\n  ${t.brand("BROWSER_USE_API_KEY")}\n  ${t.brand("AI_BASE_URL")}, ${t.brand("AI_MODEL")}, ${t.brand("AI_API_KEY")}`,
+        `\n${t.muted("you can manually populate .env and rerun. required keys:")}\n  ${t.brand("AI_BASE_URL")}, ${t.brand("AI_MODEL")}, ${t.brand("AI_API_KEY")}`,
       );
 			process.exit(1);
 		}
@@ -1131,7 +1091,7 @@ interface SchoolCsvItem {
   state: string; // two-letter
   city: string;
   url: string; // school homepage
-  preferredDirectoryUrls?: string[]; // Primary URL + Candidate 1..3
+  preferredDirectoryUrls?: string[]; // Primary URL + Candidate 1..3 + Verified URL
 }
 
 async function loadSchoolsCsv(path: string): Promise<SchoolCsvItem[]> {
@@ -1139,7 +1099,9 @@ async function loadSchoolsCsv(path: string): Promise<SchoolCsvItem[]> {
   const rows = parseCsv(text);
   const items: SchoolCsvItem[] = [];
   for (const r of rows) {
-    // unified CSV format: Hs ID, Name, State, City, School Homepage, Primary URL, Candidate 1..3
+    // schools_with_staff_urls.csv format: Hs ID, Name, State, City,
+    // School Homepage, Primary URL, Candidate 1..3, Candidate 1..3 Score,
+    // and optional Verified URL.
     const id = (r["Hs ID"] ?? r["id"] ?? "").trim();
     const name = (r["Name"] ?? r["name"] ?? "").trim();
     const state = (r["State"] ?? r["state"] ?? "").trim();
@@ -1147,8 +1109,11 @@ async function loadSchoolsCsv(path: string): Promise<SchoolCsvItem[]> {
     const homepage = (r["School Homepage"] ?? r["homepage"] ?? r["url"] ?? "").trim();
     if (!id || !name || !state || !city || !homepage) continue;
 
-    // collect preferred directory URLs (absolute, deduped, up to 3)
-    const primary = (r["Primary URL"] ?? r["Staff URL"] ?? "").trim();
+    // Collect staff-directory hints from this same row. Primary URL is the
+    // first URL the agent should try; candidates are still all included so a
+    // too-narrow primary page does not cap recall.
+    const primary = (r["Primary URL"] ?? "").trim();
+    const verified = (r["Verified URL"] ?? "").trim();
     const cand1 = (r["Candidate 1"] ?? "").trim();
     const cand2 = (r["Candidate 2"] ?? "").trim();
     const cand3 = (r["Candidate 3"] ?? "").trim();
@@ -1158,19 +1123,17 @@ async function loadSchoolsCsv(path: string): Promise<SchoolCsvItem[]> {
     const origin = (() => { try { return new URL(homepage).origin; } catch { return ""; } })();
     type Cand = { url: string; score: number };
     const cands: Cand[] = [];
+    if (primary) cands.push({ url: primary, score: Number.POSITIVE_INFINITY });
+    if (verified) cands.push({ url: verified, score: 100 });
     if (cand1) cands.push({ url: cand1, score: cand1Score });
     if (cand2) cands.push({ url: cand2, score: cand2Score });
     if (cand3) cands.push({ url: cand3, score: cand3Score });
-    // Attach a score to Primary URL by matching any candidate with same href; otherwise treat as 0
-    let primaryScore = 0;
-    const match = cands.find((c) => c.url === primary);
-    if (primary && match) cands.unshift({ url: primary, score: match.score });
-    else if (primary) cands.unshift({ url: primary, score: primaryScore });
 
-    const SCORE_THRESHOLD = 5;
     const absList: string[] = [];
-    for (const c of cands) {
-      if (c.score < SCORE_THRESHOLD) continue;
+    const ordered = cands
+      .map((c, i) => ({ ...c, i }))
+      .sort((a, b) => b.score - a.score || a.i - b.i);
+    for (const c of ordered) {
       try {
         const href = new URL(c.url, origin || undefined).href;
         if (/^https?:\/\//i.test(href)) absList.push(href);
@@ -1178,7 +1141,7 @@ async function loadSchoolsCsv(path: string): Promise<SchoolCsvItem[]> {
         // ignore
       }
     }
-    const preferredDirectoryUrls = dedupePreserveOrder(absList).slice(0, 3);
+    const preferredDirectoryUrls = dedupePreserveOrder(absList).slice(0, 5);
 
     items.push({ id, name, state, city, url: homepage, ...(preferredDirectoryUrls.length > 0 ? { preferredDirectoryUrls } : {}) });
   }
@@ -1205,42 +1168,6 @@ function dedupePreserveOrder<T>(arr: T[]): T[] {
   return out;
 }
 
-/**
- * Load staff directory URL hints keyed by school id from a CSV with headers:
- *  - "Hs ID"
- *  - "Staff URL"
- *  - "Staff URL Candidates" (JSON array of { url, score })
- */
-async function loadStaffUrlHints(path: string): Promise<Map<string, string[]>> {
-  const text = await Bun.file(path).text();
-  const rows = parseCsv(text);
-  const map = new Map<string, string[]>();
-  for (const r of rows) {
-    const id = (r["Hs ID"] ?? r["hs id"] ?? r["HS ID"] ?? "").trim();
-    if (!id) continue;
-    const primary = (r["Staff URL"] ?? "").trim();
-    const candRaw = (r["Staff URL Candidates"] ?? "").trim();
-    const list: string[] = [];
-    if (primary) list.push(primary);
-    if (candRaw) {
-      try {
-        const parsed = JSON.parse(candRaw);
-        if (Array.isArray(parsed)) {
-          for (const c of parsed) {
-            const u = typeof c === "string" ? c : c?.url;
-            if (typeof u === "string" && u.trim()) list.push(u.trim());
-          }
-        }
-      } catch {
-        // ignore malformed JSON in candidates
-      }
-    }
-    const cleaned = dedupePreserveOrder(list.filter((u) => !!u)).slice(0, 3);
-    if (cleaned.length > 0) map.set(id, cleaned);
-  }
-  return map;
-}
-
 async function runFromSchoolsCsv(flags: CliFlags): Promise<void> {
   const csvPath = resolve(flags.schoolsCsv!);
   let schools: SchoolCsvItem[] = [];
@@ -1261,7 +1188,7 @@ async function runFromSchoolsCsv(flags: CliFlags): Promise<void> {
   let concurrency = flags.concurrency || 6;
   if (flags.maxAggression) {
     const cores = Math.max(1, os.cpus()?.length || 4);
-    // 2× cores but not insane; browser-use and LLM providers will clamp us
+    // 2x cores but not insane; local browsers and LLM providers will clamp us
     concurrency = Math.max(concurrency, Math.min(32, cores * 2));
   }
 
@@ -1269,10 +1196,8 @@ async function runFromSchoolsCsv(flags: CliFlags): Promise<void> {
   const items: BatchItem[] = schools.map((s) => {
     const outputPath = pathForStateCityId(s.state, s.city, s.id);
     const slug = `${s.state.toUpperCase()}/${slugify(s.city)}/${s.id}`;
-    const preferredDirectoryUrls = s.preferredDirectoryUrls && s.preferredDirectoryUrls.length > 0
-      ? s.preferredDirectoryUrls
-      : undefined;
-    return { url: s.url, outputPath, slug, hsId: s.id, ...(preferredDirectoryUrls ? { preferredDirectoryUrls } : {}) };
+    const preferredDirectoryUrls = s.preferredDirectoryUrls ?? [];
+    return { url: s.url, outputPath, slug, ...(preferredDirectoryUrls.length > 0 ? { preferredDirectoryUrls } : {}) };
   });
 
   console.log(

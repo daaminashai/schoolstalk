@@ -8,13 +8,17 @@ to get started:
 
 ```bash
 git clone https://github.com/Hex-4/schoolyank
+python3 -m pip install -r requirements.txt
+browser-use install
 bun index.ts # if .env doesn't exist, runs setup first
 ```
 
-make sure you have a hack club AI or openrouter key ready. the setup script will help you set up an LLM API, and then use it to autonomously sign up for Browser Use (via the agent-specific challenge-response flow) and the Exa search API (via a browser use agent). Keys are saved to .env automatically.
+if `browser-use install` fails with `uvx` missing, rerun `python3 -m pip install -r requirements.txt` in the active venv and try again.
+
+make sure you have a hack club AI or openrouter key ready. the setup script will help you set up an OpenAI-compatible LLM API, then uses the local Browser Use runner with that model. Keys are saved to .env automatically.
 
 script does this:
-- spins up a browser use agent to figure out if the site is a district or a single school
+- spins up a local browser use agent to figure out if the site is a district or a single school
 - the agent traverses staff directories and lists stem teachers
 - claude wrote a ton of smart code that validates and normalizes what the agent returned
 - sends validated listing to an LLM judge - the judge strips non-stem teachers that slipped in and assigns a hacker score to teachers (CS, robotics, etc get high scores, math and etc get lower scores)
@@ -27,9 +31,11 @@ whole pipeline takes ~3min for a 50-teacher district. main slowdown is the brows
 ## usage
 the interactive mode (just `bun index.ts`) works great. but if you hate joy and pretty colors, run with flags instead:
 - `--url https://example.com` for one url. `--urls-file schools.txt` reads schools one-per-line, ignoring lines that start with #.
+- `--schools-csv schools_with_staff_urls.csv` reads everything from that one CSV. Required columns: `Hs ID`, `Name`, `State`, `City`, and `School Homepage`.
+- Staff URL hints come from the same row: `Primary URL`, `Candidate 1`, `Candidate 1 Score`, `Candidate 2`, `Candidate 2 Score`, `Candidate 3`, `Candidate 3 Score`, and optional `Verified URL`.
 - `--output` or `-o` to change the filename for one-school mode. `--merged-output` merges all results from running on multiple schools into one CSV.
 - `--linkedin` to enable linkedin enrichment. recommended.
-- `-j <n>` to adjust concurrency in batch mode. Browser Use free tier limit is 3 - probably shouldn't go above that.
+- `-j <n>` to adjust concurrency in batch mode. each job launches a local browser, so tune this for your machine.
 - `--force` to overwrite previous CSVs
 - `--debug` dumps detailed information, useful to debug flaky or weird sites
 

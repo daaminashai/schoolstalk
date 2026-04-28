@@ -7,7 +7,8 @@ dist
 output/
 *.tgz
 schools
-
+.venv
+scripts/__pycache__
 # code coverage
 coverage
 *.lcov

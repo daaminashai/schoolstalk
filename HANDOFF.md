@@ -10,7 +10,9 @@ extracts STEM teacher contact data from any K-12 school or district website → 
 
 ```bash
 bun install
-cp .env.example .env   # set BROWSER_USE_API_KEY, optionally EXA_API_KEY + AI_BASE_URL
+python3 -m pip install -r requirements.txt
+browser-use install
+cp .env.example .env   # set AI_BASE_URL, AI_MODEL, AI_API_KEY; optionally EXA_API_KEY
 bun index.ts                                            # interactive (one school)
 bun index.ts --url https://cvsdvt.org --linkedin        # one school, non-interactive
 bun index.ts --urls-file schools.txt --linkedin         # batch (3-way parallel)
@@ -19,13 +21,13 @@ bun index.ts --help                                     # full flag reference
 
 the interactive CLI prompts for a school URL and whether to enable LinkedIn enrichment. if LinkedIn is enabled and no Exa key is set, a setup wizard opens the Exa signup page, prompts for the pasted key, and saves it to `.env` for future runs. non-interactive mode skips prompts; missing EXA_API_KEY falls back to DDG scraping with a warning.
 
-batch mode caps at 3 concurrent scrapes (browser-use free-tier limit), skips any school whose output csv already exists (override with `--force`), retries each failing school once before giving up, and writes both per-school `output/<slug>.csv` files + a merged `output/all.csv` covering every teacher across every school.
+batch mode launches one local browser per concurrent scrape, skips any school whose output csv already exists (override with `--force`), retries each failing school once before giving up, and writes both per-school `output/<slug>.csv` files + a merged `output/all.csv` covering every teacher across every school.
 
 ## pipeline (6 phases)
 
 1. **classify** — is the URL a district or single-school site? (structured zod output via browser-use). follow-up umbrella-probe task drills into plural "X Schools" labels and enumerates their member schools so downstream assignment goes per-building instead of per-umbrella.
 2. **directory** — find staff directory URL(s) (navigation context for the next task)
-3. **extract** — pull every STEM teacher with per-teacher school assignment (structured zod output on `gpt-5.4-mini` for balanced recall/cost; classify/directory run on `gemini-3-flash` for minimum cost)
+3. **extract** — pull every STEM teacher with per-teacher school assignment (structured Zod/Pydantic output through the local Browser Use runner; model comes from `AI_MODEL` or `BROWSER_USE_*_MODEL` overrides)
 4. **NCES verify** — resolve each school to its federal NCES record for canonical address/phone
 5. **LLM judge passes** — one batch call classifies STEM + hacker score per teacher; one batch call adjudicates LinkedIn candidates. Keyword fallbacks run silently if the LLM errors.
 6. **email validation** — DNS MX lookup + SMTP RCPT TO probe (one connection per domain, reused for every teacher). Confirmed 550/551/553 = null the email out; timeouts = inconclusive, kept.
@@ -36,7 +38,7 @@ batch mode caps at 3 concurrent scrapes (browser-use free-tier limit), skips any
 
 | concern | solution |
 | --- | --- |
-| site navigation + extraction | `browser-use-sdk/v3` with zod structured output |
+| site navigation + extraction | local `browser-use` Python runner with Zod/Pydantic structured output |
 | federal school data | Urban Institute NCES API (free, no auth) |
 | linkedin profile lookup | Exa `category: "people"` (1000 req/mo free) |
 | linkedin fallback | DDG HTML scrape (always on, rate-limited) |
@@ -44,7 +46,7 @@ batch mode caps at 3 concurrent scrapes (browser-use free-tier limit), skips any
 | email validation | DNS MX + SMTP RCPT TO (see `src/emailValidator.ts`) — no API keys |
 | CLI | `@clack/prompts` interactive + custom argv parser for batch/non-interactive mode |
 
-only `BROWSER_USE_API_KEY` is required. `EXA_API_KEY` → better LinkedIn recall. `AI_BASE_URL` + `AI_MODEL` + `AI_API_KEY` → LLM judges (any openai-compatible endpoint). missing any optional key degrades gracefully with a warning.
+`AI_BASE_URL` + `AI_MODEL` + `AI_API_KEY` are required and are reused by local Browser Use and the LLM judges (any OpenAI-compatible endpoint, including Hack Club AI). `EXA_API_KEY` → better LinkedIn recall. missing any optional key degrades gracefully with a warning.
 
 ## key design decisions
 
@@ -83,7 +85,7 @@ total runtime: ~3 min (was ~12 min before Finalsite-specific prompt hints landed
 
 ```
 index.ts                      argv parser + interactive CLI + batch runner
-                              (preflight check for BROWSER_USE_API_KEY, retry-once
+                              (preflight check for AI config, retry-once
                               on browser-use failures, merged-csv writer)
 src/
   orchestrator.ts             pipeline glue — all phases, NCES routing, LLM judges,
@@ -98,7 +100,7 @@ src/
   validator.ts                name/email/dedup/confidence + keyword fallbacks for
                               STEM and hacker_score (used when LLM judge errors)
   csv.ts                      per-teacher school lookup + per-school + merged CSV
-  browser.ts                  browser-use SDK wrapper (runTask + runTaskStructured)
+  browser.ts                  local browser-use process wrapper (runTask + runTaskStructured)
   ai.ts                       openai-compatible llm client used by judge.ts
   types.ts                    shared types (Teacher, SchoolInfo, DistrictInfo, etc.)
   utils.ts                    name/email normalization, fuzzy helpers
