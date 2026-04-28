@@ -1,17 +1,14 @@
 // ── interactive setup wizard: walk the user from zero-env to ready-to-scrape ──
 //
-// runs when .env is missing keys. has three stages:
+// runs when .env is missing keys. has two stages:
 //   1. pick an LLM provider (hack club ai / openrouter / custom) + get api key
-//   2. sign up for browser-use via their public signup-challenge api, using
-//      the LLM we just configured to solve the text challenge
-//   3. (optional) use the fresh browser-use session to sign up for exa via a
+//   2. (optional) use the local browser-use runner to sign up for exa via a
 //      vortex temp-email address, so linkedin enrichment works out of the box
 
 import * as p from "@clack/prompts";
 import color from "picocolors";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
-import OpenAI from "openai";
 import { z } from "zod";
 import {
   createClient,
@@ -35,7 +32,7 @@ const t = {
 // ── env file management ──────────────────────────────────────────────────────
 
 /** required keys for the scraper to run. EXA is optional (linkedin fallback). */
-const REQUIRED_KEYS = ["BROWSER_USE_API_KEY", "AI_BASE_URL", "AI_MODEL", "AI_API_KEY"] as const;
+const REQUIRED_KEYS = ["AI_BASE_URL", "AI_MODEL", "AI_API_KEY"] as const;
 
 export function missingRequiredEnv(): string[] {
   return REQUIRED_KEYS.filter((k) => !process.env[k]?.trim());
@@ -176,132 +173,7 @@ async function pickModel(options: ModelOption[]): Promise<string> {
   return picked as string;
 }
 
-// ── browser-use signup via public challenge api ──────────────────────────────
-
-interface SignupChallenge {
-  challenge_id: string;
-  challenge_text: string;
-}
-
-interface SignupVerifyResponse {
-  api_key: string;
-}
-
-const BU_BASE = "https://api.browser-use.com";
-
-async function signUpForBrowserUse(llm: LlmConfig): Promise<string> {
-  const proceed = await p.confirm({
-    message: "auto-create a Browser Use account? will use the LLM to solve a text challenge",
-    initialValue: true,
-  });
-  if (!proceed) {
-    const manual = await p.password({
-      message: "paste an existing BROWSER_USE_API_KEY",
-      validate: (v) => (v && v.trim().length >= 10 ? undefined : "required"),
-    });
-    if (p.isCancel(manual)) process.exit(0);
-    return (manual as string).trim();
-  }
-
-  const spinner = p.spinner();
-  const client = new OpenAI({ baseURL: llm.baseUrl, apiKey: llm.apiKey });
-  const MAX_ATTEMPTS = 4;
-
-  let lastError = "";
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    spinner.start(
-      attempt === 1
-        ? "requesting signup challenge..."
-        : `retrying (attempt ${attempt}/${MAX_ATTEMPTS})...`,
-    );
-
-    const challengeRes = await fetch(`${BU_BASE}/cloud/signup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    if (!challengeRes.ok) {
-      spinner.stop(t.bad("challenge request failed"));
-      throw new Error(`browser-use signup challenge returned HTTP ${challengeRes.status}`);
-    }
-    const challenge = (await challengeRes.json()) as SignupChallenge;
-
-    spinner.message(`solving challenge with ${t.brand(llm.model)}...`);
-
-    const answer = await solveChallenge(client, llm.model, challenge.challenge_text);
-
-    spinner.message("verifying answer...");
-
-    const verifyRes = await fetch(`${BU_BASE}/cloud/signup/verify`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ challenge_id: challenge.challenge_id, answer }),
-    });
-    if (verifyRes.ok) {
-      const { api_key } = (await verifyRes.json()) as SignupVerifyResponse;
-      spinner.stop(t.ok("browser-use account created"));
-      return api_key;
-    }
-    const body = await verifyRes.text();
-    lastError = `HTTP ${verifyRes.status}: ${body.slice(0, 200)} — challenge was: ${challenge.challenge_text} — answered: ${answer}`;
-    spinner.stop(
-      t.warn(`attempt ${attempt} wrong (answered ${answer}) — ${attempt < MAX_ATTEMPTS ? "trying again" : "giving up"}`),
-    );
-  }
-
-  throw new Error(
-    `browser-use signup challenge failed after ${MAX_ATTEMPTS} attempts. last: ${lastError}`,
-  );
-}
-
-/**
- * solve a browser-use text challenge. the challenges are noisy natural-language
- * math problems (CJK/roman numeral digits, random punctuation sprinkled between
- * characters) designed to be solvable by LLMs. we give the model room to reason
- * then extract the final answer token.
- */
-async function solveChallenge(
-  client: OpenAI,
-  model: string,
-  challengeText: string,
-): Promise<string> {
-  const res = await client.chat.completions.create({
-    model,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You solve short natural-language math/word puzzles. The challenge text will be " +
-          "deliberately noisy: random punctuation inserted between characters, mixed casing, " +
-          "and numeric words in English, Chinese (一二三…), Japanese, or Roman. First, silently " +
-          "denoise the prompt (drop stray punctuation, interpret numeric words as their values). " +
-          "Then reason step-by-step in a brief scratchpad. Finally, on the very last line of your " +
-          "response, output exactly: `FINAL: <answer>` where <answer> is a single number or word " +
-          "with no units, punctuation, or extra commentary. Double-check arithmetic before " +
-          "committing.",
-      },
-      {
-        role: "user",
-        content: `Challenge:\n${challengeText}`,
-      },
-    ],
-  });
-
-  const raw = res.choices[0]?.message?.content?.trim() ?? "";
-  // prefer the explicit FINAL: marker; fall back to last non-empty line; then last token
-  const finalMatch = raw.match(/FINAL\s*:\s*([^\s\n]+)/i);
-  if (finalMatch?.[1]) return finalMatch[1].replace(/[.,!?;:]+$/, "");
-
-  const lines = raw
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  const lastLine = lines.at(-1) ?? raw;
-  const lastToken = lastLine.split(/\s+/).pop() ?? lastLine;
-  return lastToken.replace(/[.,!?;:]+$/, "");
-}
-
-// ── exa signup via browser-use agent + vortex temp email ─────────────────────
+// ── exa signup via local browser-use agent + vortex temp email ────────────────
 
 const EXA_SIGNUP_URL =
   "https://auth.exa.ai/?callbackUrl=https%3A%2F%2Fdashboard.exa.ai%2F";
@@ -313,14 +185,13 @@ const ExaSignupSchema = z.object({
   error: z.string().nullable(),
 });
 
-async function signUpForExa(browserUseKey: string): Promise<string | null> {
+async function signUpForExa(): Promise<string | null> {
   const proceed = await p.confirm({
-    message: "auto-sign up for Exa too? (better LinkedIn hit rate; uses a temp email)",
+    message: "auto-sign up for Exa too? (better LinkedIn hit rate; uses a local browser)",
     initialValue: true,
   });
   if (!proceed) return null;
 
-  process.env.BROWSER_USE_API_KEY = browserUseKey;
   const client = createClient();
 
   const spinner = p.spinner();
@@ -366,7 +237,7 @@ async function signUpForExa(browserUseKey: string): Promise<string | null> {
     try {
       const result = await runTaskStructured(client, session.id, task, ExaSignupSchema, {
         onMessage: (msg) => spinner2.message(msg),
-        model: "gemini-3-flash",
+        model: "default",
       });
       if (result.status === "success" && result.api_key) {
         spinner2.stop(t.ok("Exa account created"));
@@ -412,7 +283,7 @@ export async function runSetupWizard(): Promise<void> {
     `missing keys: ${missing.map((k) => t.brand(k)).join(", ")}`,
   );
 
-  // stage 1: LLM provider (needed to solve browser-use challenge)
+  // stage 1: LLM provider (used by local Browser Use and the LLM judges)
   const llm = await selectLlmProvider();
   await saveEnvVars({
     AI_BASE_URL: llm.baseUrl,
@@ -421,13 +292,18 @@ export async function runSetupWizard(): Promise<void> {
   });
   p.log.info(`${t.ok("✓")} LLM config saved`);
 
-  // stage 2: browser-use key (uses the LLM from stage 1)
-  const buKey = await signUpForBrowserUse(llm);
-  await saveEnvVars({ BROWSER_USE_API_KEY: buKey });
-  p.log.info(`${t.ok("✓")} BROWSER_USE_API_KEY saved`);
+  p.note(
+    [
+      `local Browser Use needs Python dependencies installed once:`,
+      `${t.brand("python3 -m pip install -r requirements.txt")}`,
+      `${t.brand("browser-use install")}`,
+      `If ${t.brand("browser-use install")} says ${t.brand("uvx")} is missing, rerun the pip install command in your venv.`,
+    ].join("\n"),
+    "Local Browser Use",
+  );
 
-  // stage 3: exa key (optional — uses the browser-use client from stage 2)
-  const exaKey = await signUpForExa(buKey);
+  // stage 2: exa key (optional — uses the local browser-use runner)
+  const exaKey = await signUpForExa();
   if (exaKey) {
     await saveEnvVars({ EXA_API_KEY: exaKey });
     p.log.info(`${t.ok("✓")} EXA_API_KEY saved`);

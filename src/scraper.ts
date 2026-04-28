@@ -97,10 +97,12 @@ function promptFindStaffDirectory(): string {
 
 function promptExtractTeachers(candidates?: string[]): string {
   const preface = candidates && candidates.length > 0
-    ? `Start with these candidate directory URLs (in order). Try the first; if it clearly doesn't list teachers (or is a dead page), try the second, then third. If NONE of them yields teacher/faculty entries with names/emails/titles (or profile links that reveal those), THEN search the site as usual using the discovery strategy.\n\nCandidates (in order):\n${candidates.map((u, i) => ` ${i + 1}. ${u}`).join("\n")}\n\n`
+    ? `Start with these candidate staff/directory URLs IN THIS ORDER. The first candidate is the strongest hint and should be checked before the homepage. Visit EVERY candidate URL that loads; do not stop after the first page that returns teachers. Merge teachers across all candidate pages, profile pages, filters, tabs, departments, and pagination. If a candidate is an admin-only page, still look for nearby staff/faculty/teacher links on that same site before moving on. After checking all candidates, do one quick site navigation pass for any additional staff/faculty/department pages that the candidates did not cover.\n\nCandidate staff URLs (in priority order):\n${candidates.map((u, i) => ` ${i + 1}. ${u}`).join("\n")}\n\n`
     : "";
 
-  return `${preface}Visit the staff directory pages you found. Extract EVERY teacher you can find on the site, across ALL subjects.
+  return `${preface}Extract EVERY teacher you can find on the site, across ALL subjects.
+
+If no candidate staff URLs were provided, first find the staff directory, faculty page, employee directory, teacher listing, or department pages from the homepage/nav/footer, then extract from those pages.
 
 ━━ INCLUDE ━━
 
@@ -174,8 +176,8 @@ export interface ScraperOutput {
   sessionId: string;
 }
 
-const SCRAPER_MODEL_DEFAULT = "gemini-3-flash" as const;
-const SCRAPER_MODEL_EXTRACT = "gpt-5.4-mini" as const;
+const SCRAPER_MODEL_DEFAULT = "default" as const;
+const SCRAPER_MODEL_EXTRACT = "extract" as const;
 
 export interface ScrapeSchoolOptions {
   onStatus?: (msg: string) => void;
@@ -252,13 +254,13 @@ export async function scrapeSchool(
     // moment classification completes.
     milestone(`detected school: ${siteInfo.name ?? "(unknown)"}`);
 
-    // task 2 — either try provided candidates first, or discover normally
+    // task 2 — discover normally only when no external staff URL hints exist.
     options.onScraperPhase?.("directory");
     if (preferred.length > 0) {
       status("trying provided directory candidates...");
       milestone(`using ${preferred.length} provided directory candidate${preferred.length === 1 ? "" : "s"}`);
-      // We skip generic discovery here. The extraction prompt will instruct
-      // the agent to fall back to discovery if candidates do not yield results.
+      // The extraction prompt is self-contained: it visits every candidate URL
+      // first, then does a quick extra site-navigation pass for missed pages.
     } else {
       status("finding staff directory...");
       try {
@@ -279,11 +281,10 @@ export async function scrapeSchool(
     // task 3 — extract teachers (structured output)
     options.onScraperPhase?.("extract");
     status("extracting teachers...");
-    // build candidate list: always include the current URL first so direct
-    // runs against a staff page get used immediately, then any provided
-    // preferred URLs, deduped in-order.
+    // build candidate list: explicit staff URL hints come first. The homepage
+    // is last so it can be used as fallback context without stealing priority.
     const candidates = (() => {
-      const list = [schoolUrl, ...preferred];
+      const list = [...preferred, schoolUrl];
       const seen = new Set<string>();
       const out: string[] = [];
       for (const u of list) {
