@@ -13,15 +13,13 @@ browser-use install
 bun index.ts # if .env doesn't exist, runs setup first
 ```
 
-if `browser-use install` fails with `uvx` missing, rerun `python3 -m pip install -r requirements.txt` in the active venv and try again.
-
-make sure you have a hack club AI or openrouter key ready. the setup script will help you set up an OpenAI-compatible LLM API, then uses the local Browser Use runner with that model. Keys are saved to .env automatically.
+make sure you have an OpenRouter key ready. the setup script will configure OpenRouter, and then use it to autonomously sign up for Browser Use (via the agent-specific challenge-response flow) and the Exa search API (via a browser use agent). Keys are saved to .env automatically.
 
 script does this:
 - spins up a local browser use agent to figure out if the site is a district or a single school
 - the agent traverses staff directories and lists stem teachers
 - claude wrote a ton of smart code that validates and normalizes what the agent returned
-- sends validated listing to an LLM judge - the judge strips non-stem teachers that slipped in and assigns a hacker score to teachers (CS, robotics, etc get high scores, math and etc get lower scores)
+- sends validated listing to an OpenRouter-backed LLM judge - the judge strips non-stem teachers that slipped in and assigns a hacker score to teachers (CS, robotics, etc get high scores, math and etc get lower scores)
 - attempts to validate emails (doesn't work on many home networks)
 - hits the NCES government database to get better addresses
 - uses Exa's people search vertical to get linkedin URLs and better job titles for teachers

@@ -1,28 +1,53 @@
-// ── thin wrapper around an openai-compatible local endpoint ──
+// ── thin wrapper around OpenRouter's OpenAI-compatible endpoint ──
 
 import OpenAI from "openai";
 import { debug, debugBlock, isDebug } from "./debug";
+import {
+  getOpenRouterApiKey,
+  getOpenRouterBaseUrl,
+  getOpenRouterModel,
+  openRouterHeaders,
+} from "./aiConfig";
 
-const BASE_URL = process.env.AI_BASE_URL ?? "http://localhost:20128/v1";
-const MODEL = process.env.AI_MODEL ?? "kr/claude-sonnet-4.5";
-const API_KEY = process.env.AI_API_KEY ?? "not-needed";
+let client: OpenAI | null = null;
+let clientSignature = "";
 
-// singleton client — reused across the entire pipeline
-export const ai = new OpenAI({
-  baseURL: BASE_URL,
-  apiKey: API_KEY,
-});
+function getClient(): { client: OpenAI; model: string } {
+  const baseURL = getOpenRouterBaseUrl();
+  const model = getOpenRouterModel();
+  const apiKey = getOpenRouterApiKey();
+
+  if (!apiKey) {
+    throw new Error(
+      "missing OPENROUTER_API_KEY. Create one at https://openrouter.ai/keys and add it to .env.",
+    );
+  }
+
+  const signature = `${baseURL}\0${apiKey}`;
+  if (!client || clientSignature !== signature) {
+    client = new OpenAI({
+      baseURL,
+      apiKey,
+      defaultHeaders: openRouterHeaders(),
+    });
+    clientSignature = signature;
+  }
+
+  return { client, model };
+}
 
 // send a system + user prompt and return the raw text reply
 export async function ask(system: string, user: string): Promise<string> {
+  const { client: ai, model } = getClient();
+
   if (isDebug()) {
-    debug("AI", `ask() → model=${MODEL} system=${system.length}c user=${user.length}c`);
+    debug("AI", `ask() → model=${model} system=${system.length}c user=${user.length}c`);
     debugBlock("AI", "system prompt", system);
     debugBlock("AI", "user prompt", user);
   }
   const start = Date.now();
   const res = await ai.chat.completions.create({
-    model: MODEL,
+    model,
     messages: [
       { role: "system", content: system },
       { role: "user", content: user },

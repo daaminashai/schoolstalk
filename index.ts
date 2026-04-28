@@ -987,7 +987,7 @@ async function main(): Promise<void> {
 			const msg = err instanceof Error ? err.message : String(err);
 			console.error(`${t.bad("✗ setup failed:")} ${msg}`);
       console.error(
-        `\n${t.muted("you can manually populate .env and rerun. required keys:")}\n  ${t.brand("AI_BASE_URL")}, ${t.brand("AI_MODEL")}, ${t.brand("AI_API_KEY")}`,
+        `\n${t.muted("you can manually populate .env and rerun. required keys:")}\n  ${t.brand("BROWSER_USE_API_KEY")}\n  ${t.brand("OPENROUTER_API_KEY")}`,
       );
 			process.exit(1);
 		}

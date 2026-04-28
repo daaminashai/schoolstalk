@@ -1,8 +1,10 @@
 // ── interactive setup wizard: walk the user from zero-env to ready-to-scrape ──
 //
-// runs when .env is missing keys. has two stages:
-//   1. pick an LLM provider (hack club ai / openrouter / custom) + get api key
-//   2. (optional) use the local browser-use runner to sign up for exa via a
+// runs when .env is missing keys. has three stages:
+//   1. configure OpenRouter + get api key
+//   2. sign up for browser-use via their public signup-challenge api, using
+//      the LLM we just configured to solve the text challenge
+//   3. (optional) use the fresh browser-use session to sign up for exa via a
 //      vortex temp-email address, so linkedin enrichment works out of the box
 
 import * as p from "@clack/prompts";
@@ -10,6 +12,14 @@ import color from "picocolors";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { z } from "zod";
+import {
+  DEFAULT_OPENROUTER_MODEL,
+  OPENROUTER_BASE_URL,
+  getOpenRouterApiKey,
+  getOpenRouterBaseUrl,
+  getOpenRouterModel,
+  openRouterHeaders,
+} from "./aiConfig";
 import {
   createClient,
   createSession,
@@ -32,10 +42,11 @@ const t = {
 // ── env file management ──────────────────────────────────────────────────────
 
 /** required keys for the scraper to run. EXA is optional (linkedin fallback). */
-const REQUIRED_KEYS = ["AI_BASE_URL", "AI_MODEL", "AI_API_KEY"] as const;
-
 export function missingRequiredEnv(): string[] {
-  return REQUIRED_KEYS.filter((k) => !process.env[k]?.trim());
+  const missing: string[] = [];
+  if (!process.env.BROWSER_USE_API_KEY?.trim()) missing.push("BROWSER_USE_API_KEY");
+  if (!getOpenRouterApiKey()) missing.push("OPENROUTER_API_KEY");
+  return missing;
 }
 
 /** merge a set of KEY=VALUE pairs into .env, preserving unrelated lines */
@@ -66,93 +77,42 @@ interface LlmConfig {
   apiKey: string;
 }
 
-type ProviderId = "hackclub" | "openrouter" | "custom";
-
 interface ModelOption {
   value: string;
   label: string;
   hint?: string;
 }
 
-// curated model picks per provider. kept short (2-3 options) and tuned for
+// curated OpenRouter model picks. kept short and tuned for
 // the pipeline's needs: structured json, reasoning, cheap enough for a free
 // tier. users can always swap the AI_MODEL line in .env later.
-const HACKCLUB_MODELS: ModelOption[] = [
-  { value: "google/gemini-3-flash-preview", label: "Gemini 3 Flash Preview", hint: "fast, strong reasoning" },
-  { value: "minimax/minimax-m2.5", label: "MiniMax M2.5", hint: "solid general-purpose" },
-];
-
 const OPENROUTER_MODELS: ModelOption[] = [
+  { value: DEFAULT_OPENROUTER_MODEL, label: "GPT-5 Mini", hint: "balanced, paid" },
   { value: "anthropic/claude-sonnet-4.5", label: "Claude Sonnet 4.5", hint: "best quality, paid" },
-  { value: "openai/gpt-5-mini", label: "GPT-5 Mini", hint: "balanced, paid" },
   { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash", hint: "fast + cheap" },
 ];
 
-async function selectLlmProvider(): Promise<LlmConfig> {
-  const provider = await p.select<ProviderId>({
-    message: "pick an LLM provider",
-    options: [
-      { value: "hackclub", label: "Hack Club AI", hint: "free for teens, requires Hack Club account" },
-      { value: "openrouter", label: "OpenRouter", hint: "paid, access to most frontier models" },
-      { value: "custom", label: "other OpenAI-compatible", hint: "enter your own base url + model" },
-    ],
-  });
-  if (p.isCancel(provider)) process.exit(0);
+async function configureOpenRouter(): Promise<LlmConfig> {
+  p.note(
+    [
+      `${t.bold("1.")} go to ${t.brand("https://openrouter.ai/keys")}`,
+      `${t.bold("2.")} sign up / sign in with Google or GitHub`,
+      `${t.bold("3.")} click ${t.muted("Create Key")}, give it a name, copy the ${t.muted("sk-or-...")} value`,
+      `${t.bold("4.")} add a few dollars of credit if you want paid models`,
+    ].join("\n"),
+    "OpenRouter setup",
+  );
+  const apiKey = await askApiKey("OpenRouter");
+  const model = await pickModel(OPENROUTER_MODELS);
+  return { baseUrl: OPENROUTER_BASE_URL, model, apiKey };
+}
 
-  if (provider === "hackclub") {
-    p.note(
-      [
-        `${t.bold("1.")} go to ${t.brand("https://ai.hackclub.com")}`,
-        `${t.bold("2.")} sign in with your Hack Club account`,
-        `${t.bold("3.")} click ${t.muted("Keys")} at the top → ${t.muted("Create New Key")}`,
-        `${t.bold("4.")} copy the key and paste it below`,
-      ].join("\n"),
-      "Hack Club AI setup",
-    );
-    const apiKey = await askApiKey("Hack Club AI");
-    const model = await pickModel(HACKCLUB_MODELS);
-    return { baseUrl: "https://ai.hackclub.com/proxy/v1", model, apiKey };
-  }
-
-  if (provider === "openrouter") {
-    p.note(
-      [
-        `${t.bold("1.")} go to ${t.brand("https://openrouter.ai/keys")}`,
-        `${t.bold("2.")} sign up / sign in with Google or GitHub`,
-        `${t.bold("3.")} click ${t.muted("Create Key")}, give it a name, copy the ${t.muted("sk-or-...")} value`,
-        `${t.bold("4.")} add a few dollars of credit if you want paid models`,
-      ].join("\n"),
-      "OpenRouter setup",
-    );
-    const apiKey = await askApiKey("OpenRouter");
-    const model = await pickModel(OPENROUTER_MODELS);
-    return { baseUrl: "https://openrouter.ai/api/v1", model, apiKey };
-  }
-
-  // custom: user brings their own base URL + model string
-  const baseUrl = await p.text({
-    message: "base URL (OpenAI-compatible, ends in /v1)",
-    placeholder: "https://api.example.com/v1",
-    validate: (v) => {
-      if (!v) return "required";
-      try {
-        new URL(v);
-      } catch {
-        return "not a valid url";
-      }
-    },
-  });
-  if (p.isCancel(baseUrl)) process.exit(0);
-
-  const model = await p.text({
-    message: "model name",
-    placeholder: "e.g. claude-sonnet-4.5 or gpt-5-mini",
-    validate: (v) => (v ? undefined : "required"),
-  });
-  if (p.isCancel(model)) process.exit(0);
-
-  const apiKey = await askApiKey("your provider");
-  return { baseUrl: baseUrl.trim(), model: (model as string).trim(), apiKey };
+function currentOpenRouterConfig(): LlmConfig {
+  return {
+    baseUrl: getOpenRouterBaseUrl(),
+    model: getOpenRouterModel(),
+    apiKey: getOpenRouterApiKey(),
+  };
 }
 
 async function askApiKey(label: string): Promise<string> {
@@ -173,7 +133,136 @@ async function pickModel(options: ModelOption[]): Promise<string> {
   return picked as string;
 }
 
-// ── exa signup via local browser-use agent + vortex temp email ────────────────
+// ── browser-use signup via public challenge api ──────────────────────────────
+
+interface SignupChallenge {
+  challenge_id: string;
+  challenge_text: string;
+}
+
+interface SignupVerifyResponse {
+  api_key: string;
+}
+
+const BU_BASE = "https://api.browser-use.com";
+
+async function signUpForBrowserUse(llm: LlmConfig): Promise<string> {
+  const proceed = await p.confirm({
+    message: "auto-create a Browser Use account? will use the LLM to solve a text challenge",
+    initialValue: true,
+  });
+  if (!proceed) {
+    const manual = await p.password({
+      message: "paste an existing BROWSER_USE_API_KEY",
+      validate: (v) => (v && v.trim().length >= 10 ? undefined : "required"),
+    });
+    if (p.isCancel(manual)) process.exit(0);
+    return (manual as string).trim();
+  }
+
+  const spinner = p.spinner();
+  const client = new OpenAI({
+    baseURL: llm.baseUrl,
+    apiKey: llm.apiKey,
+    defaultHeaders: openRouterHeaders(),
+  });
+  const MAX_ATTEMPTS = 4;
+
+  let lastError = "";
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    spinner.start(
+      attempt === 1
+        ? "requesting signup challenge..."
+        : `retrying (attempt ${attempt}/${MAX_ATTEMPTS})...`,
+    );
+
+    const challengeRes = await fetch(`${BU_BASE}/cloud/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!challengeRes.ok) {
+      spinner.stop(t.bad("challenge request failed"));
+      throw new Error(`browser-use signup challenge returned HTTP ${challengeRes.status}`);
+    }
+    const challenge = (await challengeRes.json()) as SignupChallenge;
+
+    spinner.message(`solving challenge with ${t.brand(llm.model)}...`);
+
+    const answer = await solveChallenge(client, llm.model, challenge.challenge_text);
+
+    spinner.message("verifying answer...");
+
+    const verifyRes = await fetch(`${BU_BASE}/cloud/signup/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ challenge_id: challenge.challenge_id, answer }),
+    });
+    if (verifyRes.ok) {
+      const { api_key } = (await verifyRes.json()) as SignupVerifyResponse;
+      spinner.stop(t.ok("browser-use account created"));
+      return api_key;
+    }
+    const body = await verifyRes.text();
+    lastError = `HTTP ${verifyRes.status}: ${body.slice(0, 200)} — challenge was: ${challenge.challenge_text} — answered: ${answer}`;
+    spinner.stop(
+      t.warn(`attempt ${attempt} wrong (answered ${answer}) — ${attempt < MAX_ATTEMPTS ? "trying again" : "giving up"}`),
+    );
+  }
+
+  throw new Error(
+    `browser-use signup challenge failed after ${MAX_ATTEMPTS} attempts. last: ${lastError}`,
+  );
+}
+
+/**
+ * solve a browser-use text challenge. the challenges are noisy natural-language
+ * math problems (CJK/roman numeral digits, random punctuation sprinkled between
+ * characters) designed to be solvable by LLMs. we give the model room to reason
+ * then extract the final answer token.
+ */
+async function solveChallenge(
+  client: OpenAI,
+  model: string,
+  challengeText: string,
+): Promise<string> {
+  const res = await client.chat.completions.create({
+    model,
+    messages: [
+      {
+        role: "system",
+        content:
+          "You solve short natural-language math/word puzzles. The challenge text will be " +
+          "deliberately noisy: random punctuation inserted between characters, mixed casing, " +
+          "and numeric words in English, Chinese (一二三…), Japanese, or Roman. First, silently " +
+          "denoise the prompt (drop stray punctuation, interpret numeric words as their values). " +
+          "Then reason step-by-step in a brief scratchpad. Finally, on the very last line of your " +
+          "response, output exactly: `FINAL: <answer>` where <answer> is a single number or word " +
+          "with no units, punctuation, or extra commentary. Double-check arithmetic before " +
+          "committing.",
+      },
+      {
+        role: "user",
+        content: `Challenge:\n${challengeText}`,
+      },
+    ],
+  });
+
+  const raw = res.choices[0]?.message?.content?.trim() ?? "";
+  // prefer the explicit FINAL: marker; fall back to last non-empty line; then last token
+  const finalMatch = raw.match(/FINAL\s*:\s*([^\s\n]+)/i);
+  if (finalMatch?.[1]) return finalMatch[1].replace(/[.,!?;:]+$/, "");
+
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const lastLine = lines.at(-1) ?? raw;
+  const lastToken = lastLine.split(/\s+/).pop() ?? lastLine;
+  return lastToken.replace(/[.,!?;:]+$/, "");
+}
+
+// ── exa signup via browser-use agent + vortex temp email ─────────────────────
 
 const EXA_SIGNUP_URL =
   "https://auth.exa.ai/?callbackUrl=https%3A%2F%2Fdashboard.exa.ai%2F";
@@ -283,14 +372,19 @@ export async function runSetupWizard(): Promise<void> {
     `missing keys: ${missing.map((k) => t.brand(k)).join(", ")}`,
   );
 
-  // stage 1: LLM provider (used by local Browser Use and the LLM judges)
-  const llm = await selectLlmProvider();
-  await saveEnvVars({
-    AI_BASE_URL: llm.baseUrl,
-    AI_MODEL: llm.model,
-    AI_API_KEY: llm.apiKey,
-  });
-  p.log.info(`${t.ok("✓")} LLM config saved`);
+  // stage 1: OpenRouter (needed to solve browser-use challenge)
+  let llm = currentOpenRouterConfig();
+  if (!llm.apiKey) {
+    llm = await configureOpenRouter();
+    await saveEnvVars({
+      AI_BASE_URL: llm.baseUrl,
+      AI_MODEL: llm.model,
+      OPENROUTER_API_KEY: llm.apiKey,
+    });
+    p.log.info(`${t.ok("✓")} OpenRouter config saved`);
+  } else {
+    p.log.info(`${t.ok("✓")} OpenRouter config found`);
+  }
 
   p.note(
     [

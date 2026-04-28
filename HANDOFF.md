@@ -10,9 +10,7 @@ extracts STEM teacher contact data from any K-12 school or district website → 
 
 ```bash
 bun install
-python3 -m pip install -r requirements.txt
-browser-use install
-cp .env.example .env   # set AI_BASE_URL, AI_MODEL, AI_API_KEY; optionally EXA_API_KEY
+cp .env.example .env   # set BROWSER_USE_API_KEY, optionally EXA_API_KEY + AI_BASE_URL
 bun index.ts                                            # interactive (one school)
 bun index.ts --url https://cvsdvt.org --linkedin        # one school, non-interactive
 bun index.ts --urls-file schools.txt --linkedin         # batch (3-way parallel)
@@ -42,11 +40,11 @@ batch mode launches one local browser per concurrent scrape, skips any school wh
 | federal school data | Urban Institute NCES API (free, no auth) |
 | linkedin profile lookup | Exa `category: "people"` (1000 req/mo free) |
 | linkedin fallback | DDG HTML scrape (always on, rate-limited) |
-| STEM classification + hacker score + linkedin judge | openai-compatible LLM endpoint (see `src/judge.ts`) — batch calls, keyword fallbacks |
+| STEM classification + hacker score + linkedin judge | OpenRouter via the OpenAI-compatible endpoint (see `src/judge.ts`) — batch calls, keyword fallbacks |
 | email validation | DNS MX + SMTP RCPT TO (see `src/emailValidator.ts`) — no API keys |
 | CLI | `@clack/prompts` interactive + custom argv parser for batch/non-interactive mode |
 
-`AI_BASE_URL` + `AI_MODEL` + `AI_API_KEY` are required and are reused by local Browser Use and the LLM judges (any OpenAI-compatible endpoint, including Hack Club AI). `EXA_API_KEY` → better LinkedIn recall. missing any optional key degrades gracefully with a warning.
+only `BROWSER_USE_API_KEY` is required. `EXA_API_KEY` → better LinkedIn recall. `AI_BASE_URL` + `AI_MODEL` + `AI_API_KEY` → LLM judges (any openai-compatible endpoint). missing any optional key degrades gracefully with a warning.
 
 ## key design decisions
 
@@ -100,7 +98,7 @@ src/
   validator.ts                name/email/dedup/confidence + keyword fallbacks for
                               STEM and hacker_score (used when LLM judge errors)
   csv.ts                      per-teacher school lookup + per-school + merged CSV
-  browser.ts                  local browser-use process wrapper (runTask + runTaskStructured)
+  browser.ts                  browser-use SDK wrapper (runTask + runTaskStructured)
   ai.ts                       openai-compatible llm client used by judge.ts
   types.ts                    shared types (Teacher, SchoolInfo, DistrictInfo, etc.)
   utils.ts                    name/email normalization, fuzzy helpers
