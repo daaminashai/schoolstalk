@@ -25,7 +25,7 @@ batch mode caps at 3 concurrent scrapes (browser-use free-tier limit), skips any
 
 1. **classify** — is the URL a district or single-school site? (structured zod output via browser-use). follow-up umbrella-probe task drills into plural "X Schools" labels and enumerates their member schools so downstream assignment goes per-building instead of per-umbrella.
 2. **directory** — find staff directory URL(s) (navigation context for the next task)
-3. **extract** — pull every STEM teacher with per-teacher school assignment (structured zod output on `claude-sonnet-4.6` for better recall; classify/directory stay on `gpt-5.4-mini` for cost)
+3. **extract** — pull every STEM teacher with per-teacher school assignment (structured zod output on `gpt-5.4-mini` for balanced recall/cost; classify/directory run on `gemini-3-flash` for minimum cost)
 4. **NCES verify** — resolve each school to its federal NCES record for canonical address/phone
 5. **LLM judge passes** — one batch call classifies STEM + hacker score per teacher; one batch call adjudicates LinkedIn candidates. Keyword fallbacks run silently if the LLM errors.
 6. **email validation** — DNS MX lookup + SMTP RCPT TO probe (one connection per domain, reused for every teacher). Confirmed 550/551/553 = null the email out; timeouts = inconclusive, kept.
