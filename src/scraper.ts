@@ -174,13 +174,8 @@ export interface ScraperOutput {
   sessionId: string;
 }
 
-// browser-use model. gpt-5.4-mini is the cheapest tier ($0.90/1M in, $5.40/1M
-// out) and handles classify + navigation well. the extract task is where
-  // recall matters most — missed teachers = silent data loss and per-run
-// variance — so we bump extraction to claude-sonnet-4.6 ($3.60/$18.00) for
-// stronger coverage on long keyword sweeps.
-const SCRAPER_MODEL_DEFAULT = "gpt-5.4-mini" as const;
-const SCRAPER_MODEL_EXTRACT = "claude-sonnet-4.6" as const;
+const SCRAPER_MODEL_DEFAULT = "gemini-3-flash" as const;
+const SCRAPER_MODEL_EXTRACT = "gpt-5.4-mini" as const;
 
 export interface ScrapeSchoolOptions {
   onStatus?: (msg: string) => void;
