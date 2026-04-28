@@ -11,8 +11,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
+import tempfile
 from enum import Enum
+from pathlib import Path
 from typing import Any, Literal, Union
 
 PREFIX = "__SCHOOLYANK_BROWSER_USE__"
@@ -110,7 +113,38 @@ def make_llm(slot: str | None) -> ChatOpenRouter:
     )
 
 
-def make_browser() -> Browser:
+def isolated_user_data_dir(configured: str) -> tuple[str, str | None]:
+    """Return a per-process profile dir so parallel Chromium launches never share one."""
+
+    if not configured:
+        return "", None
+
+    configured_path = Path(configured).expanduser()
+    if not configured_path.is_absolute():
+        configured_path = Path.cwd() / configured_path
+
+    session_id = env_str("SCHOOLYANK_BROWSER_SESSION_ID") or "local"
+    temp_root = Path(tempfile.mkdtemp(prefix=f"schoolyank-browser-{session_id}-"))
+
+    # Treat BROWSER_USE_USER_DATA_DIR as a template for single-session runs, but
+    # never hand the same user-data-dir to two Chromium processes in parallel.
+    default_profile = configured_path / "Default"
+    if default_profile.exists():
+        try:
+            shutil.copytree(default_profile, temp_root / "Default", dirs_exist_ok=True)
+        except Exception:
+            pass
+    local_state = configured_path / "Local State"
+    if local_state.exists():
+        try:
+            shutil.copy2(local_state, temp_root / "Local State")
+        except Exception:
+            pass
+
+    return str(temp_root), str(temp_root)
+
+
+def make_browser() -> tuple[Browser, str | None]:
     kwargs: dict[str, Any] = {"keep_alive": True}
     headless = env_bool("BROWSER_USE_HEADLESS")
     if headless is None:
@@ -120,9 +154,13 @@ def make_browser() -> Browser:
 
     user_data_dir = os.getenv("BROWSER_USE_USER_DATA_DIR")
     if user_data_dir:
-        kwargs["user_data_dir"] = user_data_dir
+        isolated_dir, cleanup_dir = isolated_user_data_dir(user_data_dir)
+        if isolated_dir:
+            kwargs["user_data_dir"] = isolated_dir
+    else:
+        cleanup_dir = None
 
-    return Browser(**kwargs)
+    return Browser(**kwargs), cleanup_dir
 
 
 def model_name(prefix: str) -> str:
@@ -231,7 +269,15 @@ async def run_task(browser: Browser, request: dict[str, Any]) -> None:
 
 
 async def main() -> None:
-    browser = make_browser()
+    browser, cleanup_dir = make_browser()
+    try:
+        await browser.start()
+    except Exception as exc:
+        emit({"type": "error", "message": str(exc)})
+        if cleanup_dir:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
+        raise SystemExit(1)
+
     emit({"type": "ready", "session_id": os.getenv("SCHOOLYANK_BROWSER_SESSION_ID", "local")})
 
     loop = asyncio.get_running_loop()
@@ -256,6 +302,8 @@ async def main() -> None:
         await browser.kill()
     except Exception:
         pass
+    if cleanup_dir:
+        shutil.rmtree(cleanup_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

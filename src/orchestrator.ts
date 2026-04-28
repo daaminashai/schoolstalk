@@ -84,7 +84,10 @@ export async function run(
     export: 4,
   };
 
+  let currentPhase: PhaseId | null = null;
   function enterPhase(phase: PhaseId) {
+    if (phase === currentPhase) return;
+    currentPhase = phase;
     onPhase(phase, phaseIndex[phase], totalPhases);
   }
 

@@ -53,6 +53,7 @@ const LOCAL_SCRIPT = resolve(
   "scripts",
   "local_browser_use_agent.py",
 );
+let localBrowserStartupQueue: Promise<void> = Promise.resolve();
 
 /** create a local browser-use client. no cloud API key is used. */
 export function createClient(): BrowserClient {
@@ -77,10 +78,33 @@ export async function createSession(
   client: BrowserClient,
   _options?: { profileId?: string },
 ): Promise<SessionInfo> {
-  const session = new LocalBrowserSession();
-  await session.ready;
+  const session = await withSerializedLocalBrowserStartup(async () => {
+    const nextSession = new LocalBrowserSession();
+    try {
+      await nextSession.ready;
+      return nextSession;
+    } catch (err) {
+      await nextSession.stop().catch(() => {});
+      throw err;
+    }
+  });
   client.sessions.set(session.id, session);
   return { id: session.id, liveUrl: "" };
+}
+
+async function withSerializedLocalBrowserStartup<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = localBrowserStartupQueue;
+  let release!: () => void;
+  localBrowserStartupQueue = new Promise<void>((resolveQueue) => {
+    release = resolveQueue;
+  });
+
+  await previous.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
 }
 
 class LocalBrowserSession {
@@ -105,7 +129,13 @@ class LocalBrowserSession {
 
     this.proc = spawn(pythonExecutable(), [LOCAL_SCRIPT], {
       cwd: PROJECT_ROOT,
-      env: { ...process.env, SCHOOLYANK_BROWSER_SESSION_ID: this.id },
+      env: {
+        ...process.env,
+        SCHOOLYANK_BROWSER_SESSION_ID: this.id,
+        TIMEOUT_BrowserStartEvent: process.env.TIMEOUT_BrowserStartEvent || "90",
+        TIMEOUT_BrowserLaunchEvent: process.env.TIMEOUT_BrowserLaunchEvent || "90",
+        TIMEOUT_BrowserConnectedEvent: process.env.TIMEOUT_BrowserConnectedEvent || "90",
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
 
