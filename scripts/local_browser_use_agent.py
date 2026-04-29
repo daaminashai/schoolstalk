@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -23,6 +24,8 @@ from typing import Any, Literal, Union
 
 PREFIX = "__SCHOOLYANK_BROWSER_USE__"
 
+_ORIGINAL_ASYNCIO_WAIT_FOR = asyncio.wait_for
+
 
 def emit(payload: dict[str, Any]) -> None:
     print(PREFIX + json.dumps(payload, separators=(",", ":")), flush=True)
@@ -31,6 +34,28 @@ def emit(payload: dict[str, Any]) -> None:
 def die(message: str) -> None:
     emit({"type": "error", "message": message})
     raise SystemExit(1)
+
+
+def env_float(name: str, fallback: float, minimum: float | None = None) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return fallback
+    try:
+        value = float(raw)
+    except ValueError:
+        return fallback
+    return max(minimum, value) if minimum is not None else value
+
+
+async def wait_for_with_browser_connect_timeout(awaitable: Any, timeout: float | None = None) -> Any:
+    # browser-use currently hardcodes CDP connect startup to 15s. That is too
+    # low when hundreds of local Chromium processes are ramping up on one host.
+    if timeout == 15.0:
+        timeout = env_float("BROWSER_USE_CDP_CONNECT_TIMEOUT_SECONDS", 60.0, 1.0)
+    return await _ORIGINAL_ASYNCIO_WAIT_FOR(awaitable, timeout=timeout)
+
+
+asyncio.wait_for = wait_for_with_browser_connect_timeout
 
 
 try:
@@ -60,6 +85,17 @@ def env_bool(name: str) -> bool | None:
 
 def env_str(name: str) -> str:
     return os.getenv(name, "").strip()
+
+
+def env_int(name: str, fallback: int, minimum: int | None = None) -> int:
+    raw = env_str(name)
+    if not raw:
+        return fallback
+    try:
+        value = int(raw)
+    except ValueError:
+        return fallback
+    return max(minimum, value) if minimum is not None else value
 
 
 def is_openrouter_base_url(base_url: str) -> bool:
@@ -149,12 +185,33 @@ def isolated_user_data_dir(configured: str) -> tuple[str, str]:
 
 
 def make_browser() -> tuple[Browser, str]:
-    kwargs: dict[str, Any] = {"keep_alive": True}
+    enable_extensions = env_bool("BROWSER_USE_ENABLE_DEFAULT_EXTENSIONS") is True
+    kwargs: dict[str, Any] = {
+        "keep_alive": True,
+        "enable_default_extensions": enable_extensions,
+        "captcha_solver": env_bool("BROWSER_USE_CAPTCHA_SOLVER") is True,
+        "highlight_elements": env_bool("BROWSER_USE_HIGHLIGHT_ELEMENTS") is True,
+    }
     headless = env_bool("BROWSER_USE_HEADLESS")
     if headless is None:
         headless = env_bool("BROWSER_USE_LOCAL_HEADLESS")
-    if headless is not None:
-        kwargs["headless"] = headless
+    if headless is None:
+        headless = True
+    kwargs["headless"] = headless
+
+    width = env_int("BROWSER_USE_VIEWPORT_WIDTH", 1365, 320)
+    height = env_int("BROWSER_USE_VIEWPORT_HEIGHT", 768, 240)
+    kwargs["viewport"] = {"width": width, "height": height}
+
+    args = [
+        "--disable-gpu",
+    ]
+    if not enable_extensions:
+        args.append("--disable-extensions")
+    extra_args = env_str("BROWSER_USE_CHROME_ARGS")
+    if extra_args:
+        args.extend(shlex.split(extra_args))
+    kwargs["args"] = args
 
     isolated_dir, cleanup_dir = isolated_user_data_dir(os.getenv("BROWSER_USE_USER_DATA_DIR", ""))
     kwargs["user_data_dir"] = isolated_dir

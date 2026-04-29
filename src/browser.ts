@@ -2,6 +2,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
+import { cpus } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -56,7 +57,12 @@ const LOCAL_SCRIPT = resolve(
   "local_browser_use_agent.py",
 );
 const DEFAULT_BROWSER_START_TIMEOUT_SECONDS = "120";
-const LOCAL_BROWSER_START_ATTEMPTS = 2;
+const DEFAULT_BROWSER_START_ATTEMPTS = 4;
+const DEFAULT_BROWSER_START_GAP_MS = 150;
+
+let activeBrowserStarts = 0;
+let nextBrowserStartAt = 0;
+const browserStartWaiters: Array<() => void> = [];
 
 /** create a local browser-use client. no cloud API key is used. */
 export function createClient(): BrowserClient {
@@ -82,18 +88,27 @@ export async function createSession(
   _options?: { profileId?: string },
 ): Promise<SessionInfo> {
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= LOCAL_BROWSER_START_ATTEMPTS; attempt++) {
-    const session = new LocalBrowserSession();
+  const attempts = browserStartAttempts();
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      await session.ready;
+      const session = await withBrowserStartSlot(async () => {
+        const started = new LocalBrowserSession();
+        try {
+          await started.ready;
+          return started;
+        } catch (err) {
+          await started.stop().catch(() => {});
+          throw err;
+        }
+      });
       client.sessions.set(session.id, session);
       return { id: session.id, liveUrl: "" };
     } catch (err) {
       lastErr = err;
-      await session.stop().catch(() => {});
-      if (attempt === LOCAL_BROWSER_START_ATTEMPTS || !isBrowserStartupTimeout(err)) {
+      if (attempt === attempts || !isBrowserStartupTimeout(err)) {
         throw err;
       }
+      await sleep(browserStartRetryDelayMs(attempt));
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
@@ -101,7 +116,72 @@ export async function createSession(
 
 function isBrowserStartupTimeout(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
-  return /Browser(Start|Launch|Connected)Event.*timed out|browser.*start.*timed out/i.test(message);
+  return /Browser(Start|Launch|Connected)Event.*timed out|browser.*start.*timed out|connect\(\) timed out|CDP connection.*timed out/i.test(message);
+}
+
+async function withBrowserStartSlot<T>(fn: () => Promise<T>): Promise<T> {
+  await acquireBrowserStartSlot();
+  try {
+    return await fn();
+  } finally {
+    releaseBrowserStartSlot();
+  }
+}
+
+async function acquireBrowserStartSlot(): Promise<void> {
+  const maxStarts = browserStartConcurrency();
+  while (activeBrowserStarts >= maxStarts) {
+    await new Promise<void>((resolveWait) => browserStartWaiters.push(resolveWait));
+  }
+
+  activeBrowserStarts++;
+
+  const gapMs = browserStartGapMs();
+  if (gapMs <= 0) return;
+
+  const now = Date.now();
+  const waitMs = Math.max(0, nextBrowserStartAt - now);
+  nextBrowserStartAt = Math.max(now, nextBrowserStartAt) + gapMs;
+  if (waitMs > 0) await sleep(waitMs);
+}
+
+function releaseBrowserStartSlot(): void {
+  activeBrowserStarts = Math.max(0, activeBrowserStarts - 1);
+  browserStartWaiters.shift()?.();
+}
+
+function browserStartConcurrency(): number {
+  const configured = envInt("SCHOOLYANK_BROWSER_START_CONCURRENCY", 0, 0);
+  if (configured > 0) return configured;
+
+  const cores = Math.max(1, cpus()?.length || 4);
+  return Math.max(4, Math.min(24, Math.floor(cores / 8) || 4));
+}
+
+function browserStartAttempts(): number {
+  return envInt("SCHOOLYANK_BROWSER_START_ATTEMPTS", DEFAULT_BROWSER_START_ATTEMPTS, 1);
+}
+
+function browserStartGapMs(): number {
+  return envInt("SCHOOLYANK_BROWSER_START_GAP_MS", DEFAULT_BROWSER_START_GAP_MS, 0);
+}
+
+function browserStartRetryDelayMs(attempt: number): number {
+  const baseMs = envInt("SCHOOLYANK_BROWSER_START_RETRY_DELAY_MS", 1_500, 0);
+  const jitterMs = envInt("SCHOOLYANK_BROWSER_START_RETRY_JITTER_MS", 1_500, 0);
+  return baseMs * attempt + Math.floor(Math.random() * (jitterMs + 1));
+}
+
+function envInt(name: string, fallback: number, min = 1): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.max(min, Math.floor(n)) : fallback;
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
 class LocalBrowserSession {

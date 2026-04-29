@@ -280,6 +280,16 @@ function envInt(name: string, fallback: number, min = 1): number {
   return Number.isFinite(n) ? Math.max(min, Math.floor(n)) : fallback;
 }
 
+function resolveBatchConcurrency(flags: CliFlags): number {
+  let concurrency = flags.concurrency || 6;
+  if (flags.maxAggression) {
+    const cores = Math.max(1, os.cpus()?.length || 4);
+    const maxConcurrency = envInt("SCHOOLYANK_MAX_CONCURRENCY", 500);
+    concurrency = Math.max(concurrency, Math.min(maxConcurrency, cores * 2));
+  }
+  return concurrency;
+}
+
 function scrapeAttemptLimit(rateLimited: boolean): number {
   return rateLimited
     ? envInt("SCHOOLYANK_MAX_RATE_LIMIT_ATTEMPTS", 2)
@@ -314,7 +324,7 @@ function printHelp(): void {
     `  ${t.brand("--output, -o")} <path>    single-url output csv path (default: output/<slug>.csv)`,
     `  ${t.brand("--merged-output")} <path> batch merged csv path (default: output/all.csv)`,
     `  ${t.brand("--concurrency, -j")} <n>  parallel workers`,
-    `  ${t.brand("--max")}                  ramp concurrency up (≈2× CPU)`,
+    `  ${t.brand("--max")}                  ramp concurrency up (≈2× CPU, capped by SCHOOLYANK_MAX_CONCURRENCY; default 500)`,
     `  ${t.brand("--force")}                re-scrape even if output csv already exists`,
     `  ${t.brand("--interactive")}          force interactive prompt even when urls are passed`,
     `  ${t.brand("--debug")}                print extremely detailed debug info (browser agent, llm, nces, etc.)`,
@@ -1163,8 +1173,9 @@ async function runNonInteractive(flags: CliFlags): Promise<void> {
     return { url, outputPath, slug };
   });
 
+  const concurrency = resolveBatchConcurrency(flags);
   console.log(
-    `${BRAND_TAG}  ${t.muted(`${items.length} school${items.length === 1 ? "" : "s"}, concurrency ${flags.concurrency}`)}`,
+    `${BRAND_TAG}  ${t.muted(`${items.length} school${items.length === 1 ? "" : "s"}, concurrency ${concurrency}`)}`,
   );
   // linkedin removed
 
@@ -1185,8 +1196,8 @@ async function runNonInteractive(flags: CliFlags): Promise<void> {
 
   const batchStart = Date.now();
   const slack = createSlackFromEnv();
-  const slackThread = await startBatchSlackThread(slack, items, flags.concurrency, "batch scrape");
-  const outcomes = await runBatch(items, flags.concurrency, flags.force, slack);
+  const slackThread = await startBatchSlackThread(slack, items, concurrency, "batch scrape");
+  const outcomes = await runBatch(items, concurrency, flags.force, slack);
   const batchDurationSec = ((Date.now() - batchStart) / 1000).toFixed(1);
   await finishBatchSlackThread(slack, slackThread, outcomes, batchDurationSec);
 
@@ -1540,13 +1551,7 @@ async function runFromSchoolsCsv(flags: CliFlags): Promise<void> {
     process.exit(1);
   }
 
-  // aggressive concurrency when --max is set; otherwise honor -j or default to 6
-  let concurrency = flags.concurrency || 6;
-  if (flags.maxAggression) {
-    const cores = Math.max(1, os.cpus()?.length || 4);
-    // 2x cores but not insane; local browsers and LLM providers will clamp us
-    concurrency = Math.max(concurrency, Math.min(32, cores * 2));
-  }
+  const concurrency = resolveBatchConcurrency(flags);
 
   // build batch items
   const items: BatchItem[] = schools.map((s) => {
