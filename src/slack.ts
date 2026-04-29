@@ -92,7 +92,7 @@ function slackEnvValue(name: string): string | null {
     return value;
 }
 
-// Aggregates per-school logs and posts a single concise Slack message
+// Streams per-school progress into a thread and posts a concise final summary.
 export class SlackThreadBuffer {
     constructor(private slack: SlackNotifier, private threadTs: string | null) {}
 
@@ -101,11 +101,14 @@ export class SlackThreadBuffer {
     private infos: string[] = [];
     private liveUrl: string | null = null;
     private retried = false;
+    private pendingPost: Promise<void> = Promise.resolve();
 
     addPhase(label: string): void {
         if (!label) return;
         const compact = label.toLowerCase();
-        if (this.phases.at(-1) !== compact) this.phases.push(compact);
+        if (this.phases.at(-1) === compact) return;
+        this.phases.push(compact);
+        this.enqueue(`➡️ ${label}`);
     }
 
     addMilestone(msg: string, level?: string | null): void {
@@ -117,18 +120,34 @@ export class SlackThreadBuffer {
         // Cap stored entries to keep memory and final message short
         if (this.warnings.length > 5) this.warnings = this.warnings.slice(-5);
         if (this.infos.length > 5) this.infos = this.infos.slice(-5);
+        this.enqueue(`${level === "warn" ? "⚠️" : "•"} ${trimmed}`);
     }
 
     addLive(url: string): void {
-        if (url) this.liveUrl = url;
+        if (!url || this.liveUrl === url) return;
+        this.liveUrl = url;
+        this.enqueue(`• Live: ${url}`);
     }
 
     markRetried(): void {
+        if (!this.retried) this.enqueue(`⚠️ Retrying scrape`);
         this.retried = true;
+    }
+
+    private enqueue(text: string): void {
+        if (!this.threadTs) return;
+        this.pendingPost = this.pendingPost
+            .catch(() => {})
+            .then(() => this.slack.postInThread(this.threadTs!, text));
+    }
+
+    private async flush(): Promise<void> {
+        await this.pendingPost.catch(() => {});
     }
 
     async finalizeSuccess(teachers: number, durationSec: string, csvPath: string): Promise<void> {
         if (!this.threadTs) return;
+        await this.flush();
         const lines: string[] = [];
         lines.push(`✅ Done`);
         lines.push(`• Teachers: *${teachers}*`);
@@ -149,9 +168,9 @@ export class SlackThreadBuffer {
     }
 
     async finalizeFailure(errorMsg: string): Promise<void> {
-        const mentionPrefix = ""; // SlackNotifier.postError will add mention if configured
+        await this.flush();
         const lines: string[] = [];
-        lines.push(`${mentionPrefix}❌ Failed`);
+        lines.push(`Failed`);
         lines.push(`• Error: ${errorMsg}`);
         if (this.phases.length > 0) lines.push(`• Last phase: ${this.phases.at(-1)}`);
         if (this.liveUrl) lines.push(`• Live: ${this.liveUrl}`);

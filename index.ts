@@ -609,7 +609,7 @@ async function runInteractive(): Promise<void> {
       slackThread = await slack.startThread(
         `:hc: In Prod, Starting scrape: ${config.schoolUrl}`,
       );
-      if (slackThread) slackBuf = new SlackThreadBuffer(slack, slackThread);
+      slackBuf = new SlackThreadBuffer(slack, slackThread);
     } catch {}
     if (!slackThread) {
       p.log.warn(
@@ -768,7 +768,7 @@ async function finishBatchSlackThread(
   const failed = outcomes.filter((o) => o.status === "failed");
   const teachers = okOutcomes.reduce((sum, o) => sum + (o.result?.teachers.length ?? 0), 0);
   const lines = [
-    failed.length > 0 ? `❌ Batch finished with failures` : `✅ Batch complete`,
+    failed.length > 0 ? `Batch finished with failures` : `✅ Batch complete`,
     `OK: *${okOutcomes.length}*`,
     `Skipped: ${skipped}`,
     `Failed: ${failed.length}`,
@@ -780,7 +780,11 @@ async function finishBatchSlackThread(
   }
   if (failed.length > 10) lines.push(`More failures: ${failed.length - 10}`);
 
-  await slack.postInThread(threadTs, lines.join("\n"));
+  if (failed.length > 0) {
+    await slack.postError(threadTs, lines.join("\n"));
+  } else {
+    await slack.postInThread(threadTs, lines.join("\n"));
+  }
 }
 
 interface ExistingSchoolCsvIndex {
@@ -921,13 +925,6 @@ async function runBatch(
 ): Promise<BatchOutcome[]> {
   installCleanupHandlers();
 
-  const slackThreadsEnabled = !!slack && (items.length <= 20 || envBool("SCHOOLYANK_BATCH_SLACK_THREADS"));
-  if (slack && !slackThreadsEnabled) {
-    console.log(
-      t.muted("slack: per-school thread posts disabled for large batch; set SCHOOLYANK_BATCH_SLACK_THREADS=true to enable"),
-    );
-  }
-
   const outcomes: BatchOutcome[] = new Array(items.length);
   const existingSchoolCsvs = scanExistingSchoolCsvs();
 
@@ -1008,13 +1005,13 @@ async function runBatch(
 
       let threadTs: string | null = null;
       let buf: SlackThreadBuffer | null = null;
-      if (slack && slackThreadsEnabled) {
+      if (slack) {
         try {
           threadTs = await slack.startThread(
             `:hc: In Prod, Starting scrape: ${item.url} (${item.slug})`,
           );
-          if (threadTs) buf = new SlackThreadBuffer(slack, threadTs);
         } catch {}
+        buf = new SlackThreadBuffer(slack, threadTs);
         if (!threadTs) {
           console.log(
             t.warn(
@@ -1025,7 +1022,6 @@ async function runBatch(
       }
 
       console.log(`${t.muted(tag)} ${t.bold("starting")} ${t.brand(item.url)}`);
-      // avoid mid-run Slack noise; only final summaries will be sent
 
       // one-retry policy: browser-use sessions can drop or hit transient
       // rate limits; a fresh retry resolves most of these. without this,
