@@ -149,9 +149,9 @@ class LocalBrowserSession {
       env: {
         ...process.env,
         SCHOOLYANK_BROWSER_SESSION_ID: this.id,
-        TIMEOUT_BrowserStartEvent: process.env.TIMEOUT_BrowserStartEvent || DEFAULT_BROWSER_START_TIMEOUT_SECONDS,
-        TIMEOUT_BrowserLaunchEvent: process.env.TIMEOUT_BrowserLaunchEvent || DEFAULT_BROWSER_START_TIMEOUT_SECONDS,
-        TIMEOUT_BrowserConnectedEvent: process.env.TIMEOUT_BrowserConnectedEvent || DEFAULT_BROWSER_START_TIMEOUT_SECONDS,
+        TIMEOUT_BrowserStartEvent: browserStartTimeout("TIMEOUT_BrowserStartEvent"),
+        TIMEOUT_BrowserLaunchEvent: browserStartTimeout("TIMEOUT_BrowserLaunchEvent"),
+        TIMEOUT_BrowserConnectedEvent: browserStartTimeout("TIMEOUT_BrowserConnectedEvent"),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -445,6 +445,15 @@ function pythonExecutable(): string {
   if (existsSync(projectVenvPython)) return projectVenvPython;
 
   return "python3";
+}
+
+function browserStartTimeout(name: string): string {
+  const minSeconds = Number(process.env.SCHOOLYANK_MIN_BROWSER_START_TIMEOUT_SECONDS ?? DEFAULT_BROWSER_START_TIMEOUT_SECONDS);
+  const configured = Number(process.env[name] ?? DEFAULT_BROWSER_START_TIMEOUT_SECONDS);
+  const seconds = Number.isFinite(configured)
+    ? Math.max(configured, Number.isFinite(minSeconds) ? minSeconds : Number(DEFAULT_BROWSER_START_TIMEOUT_SECONDS))
+    : Number(DEFAULT_BROWSER_START_TIMEOUT_SECONDS);
+  return String(seconds);
 }
 
 /** coerce free-form output into a usable string */

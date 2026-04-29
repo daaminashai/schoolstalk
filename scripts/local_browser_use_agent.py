@@ -381,11 +381,25 @@ async def run_task(browser: Browser, request: dict[str, Any]) -> None:
         )
         emit({"type": "progress", "request_id": request_id, "message": "local agent started"})
         history = await agent.run()
+        try:
+            output = parse_final_result(history.final_result(), schema)
+        except Exception as exc:
+            empty = empty_array_object_output(schema)
+            if empty is None:
+                raise
+            emit(
+                {
+                    "type": "progress",
+                    "request_id": request_id,
+                    "message": f"structured output was not valid JSON ({exc}); using empty result",
+                }
+            )
+            output = empty
         emit(
             {
                 "type": "done",
                 "request_id": request_id,
-                "output": parse_final_result(history.final_result(), schema),
+                "output": output,
             }
         )
     except Exception as exc:

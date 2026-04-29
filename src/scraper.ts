@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { debug } from "./debug";
 import type { RawTeacherData, RawSiteInfo } from "./types";
+import { tryHasuraBypass } from "./hasuraBypass";
 import { tryThrillshareBypass } from "./thrillshareBypass";
 import {
   createClient,
@@ -103,6 +104,15 @@ export async function scrapeSchool(
   debug("SCRAPER", `scrapeSchool → ${schoolUrl}`);
 
   options.onScraperPhase?.("extract");
+
+  const hasura = await tryHasuraBypass(schoolUrl, status);
+  if (hasura) {
+    hasura.siteInfo.name = hasura.siteInfo.name ?? options.schoolName ?? null;
+    milestone(
+      `used Apptegy Hasura API bypass (${hasura.teachers.length} teacher candidate${hasura.teachers.length === 1 ? "" : "s"})`,
+    );
+    return hasura;
+  }
 
   const direct = await tryThrillshareBypass(schoolUrl, preferred, status);
   if (direct) {

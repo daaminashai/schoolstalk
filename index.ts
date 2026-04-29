@@ -27,7 +27,7 @@ import {
 import type { ScrapeConfig, ScrapeResult, Teacher } from "./src/types";
 import os from "node:os";
 import { installFileLogger } from "./src/fileLogger";
-import { isRateLimitError, sleep } from "./src/retry";
+import { isPaymentOrQuotaError, isRateLimitError, sleep } from "./src/retry";
 import { claim, describeOwner, installCleanupHandlers, release } from "./src/lock";
 
 installFileLogger();
@@ -273,6 +273,26 @@ function envBool(name: string): boolean {
   return /^(1|true|yes|on)$/i.test(process.env[name]?.trim() ?? "");
 }
 
+function envInt(name: string, fallback: number, min = 1): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.max(min, Math.floor(n)) : fallback;
+}
+
+function effectiveConcurrency(requested: number): { value: number; capped: boolean; max: number } {
+  const max = envInt("SCHOOLYANK_MAX_CONCURRENCY", 32);
+  if (envBool("SCHOOLYANK_ALLOW_UNSAFE_CONCURRENCY")) return { value: requested, capped: false, max };
+  const value = Math.min(requested, max);
+  return { value, capped: value !== requested, max };
+}
+
+function scrapeAttemptLimit(rateLimited: boolean): number {
+  return rateLimited
+    ? envInt("SCHOOLYANK_MAX_RATE_LIMIT_ATTEMPTS", 2)
+    : envInt("SCHOOLYANK_MAX_SCRAPE_ATTEMPTS", 2);
+}
+
 async function loadUrlsFromFile(path: string): Promise<string[]> {
   const text = await Bun.file(path).text();
   return text
@@ -300,8 +320,8 @@ function printHelp(): void {
     `  ${t.brand("--schools-csv")} <path>   read schools from CSV (expects: Hs ID, Name, State, City, School Homepage, Primary URL, Candidate 1..3)`,
     `  ${t.brand("--output, -o")} <path>    single-url output csv path (default: output/<slug>.csv)`,
     `  ${t.brand("--merged-output")} <path> batch merged csv path (default: output/all.csv)`,
-    `  ${t.brand("--concurrency, -j")} <n>  parallel workers (higher = faster; risk of rate limits)`,
-    `  ${t.brand("--max")}                  ramp concurrency up (≈2× CPU, capped)`,
+    `  ${t.brand("--concurrency, -j")} <n>  parallel workers (capped by SCHOOLYANK_MAX_CONCURRENCY, default 32)`,
+    `  ${t.brand("--max")}                  ramp concurrency up (≈2× CPU, still capped)`,
     `  ${t.brand("--force")}                re-scrape even if output csv already exists`,
     `  ${t.brand("--interactive")}          force interactive prompt even when urls are passed`,
     `  ${t.brand("--debug")}                print extremely detailed debug info (browser agent, llm, nces, etc.)`,
@@ -855,6 +875,24 @@ async function runBatch(
 ): Promise<BatchOutcome[]> {
   installCleanupHandlers();
 
+  const requestedConcurrency = concurrency;
+  const effective = effectiveConcurrency(requestedConcurrency);
+  concurrency = effective.value;
+  if (effective.capped) {
+    console.log(
+      t.warn(
+        `requested concurrency ${requestedConcurrency} capped to ${concurrency}; set SCHOOLYANK_MAX_CONCURRENCY or SCHOOLYANK_ALLOW_UNSAFE_CONCURRENCY=true to override`,
+      ),
+    );
+  }
+
+  const slackThreadsEnabled = !!slack && (items.length <= 20 || envBool("SCHOOLYANK_BATCH_SLACK_THREADS"));
+  if (slack && !slackThreadsEnabled) {
+    console.log(
+      t.muted("slack: per-school thread posts disabled for large batch; set SCHOOLYANK_BATCH_SLACK_THREADS=true to enable"),
+    );
+  }
+
   const outcomes: BatchOutcome[] = new Array(items.length);
   const existingSchoolCsvs = scanExistingSchoolCsvs();
   let cursor = 0;
@@ -900,7 +938,7 @@ async function runBatch(
 
       let threadTs: string | null = null;
       let buf: SlackThreadBuffer | null = null;
-      if (slack) {
+      if (slack && slackThreadsEnabled) {
         try {
           threadTs = await slack.startThread(
             `:hc: In Prod, Starting scrape: ${item.url} (${item.slug})`,
@@ -926,7 +964,7 @@ async function runBatch(
       let lastError = "";
       let sawRateLimit = false;
       try {
-        for (let attempt = 1; attempt <= 5; attempt++) {
+        for (let attempt = 1; attempt <= Math.max(scrapeAttemptLimit(false), scrapeAttemptLimit(true)); attempt++) {
           try {
             const r = await scrapeOne(
               item.url,
@@ -940,7 +978,7 @@ async function runBatch(
             // treat 0 teachers as a retry-eligible failure — it's almost always
             // a transient scraper gave-up / browser-use flake, not a real
             // empty district. a real empty district is vanishingly rare.
-            if (r.teachers.length === 0 && attempt === 1) {
+            if (r.teachers.length === 0 && attempt < scrapeAttemptLimit(false)) {
               console.log(
                 `${t.muted(tag)} ${t.warn("! first attempt returned 0 teachers — retrying once")}`,
               );
@@ -953,12 +991,14 @@ async function runBatch(
           } catch (err) {
             lastError = err instanceof Error ? err.message : String(err);
             const rateLimited = isRateLimitError(err);
+            const paymentOrQuota = isPaymentOrQuotaError(err);
             sawRateLimit = sawRateLimit || rateLimited;
-            const shouldRetry = rateLimited || attempt === 1;
-            if (shouldRetry && attempt < 5) {
+            const limit = scrapeAttemptLimit(rateLimited);
+            const shouldRetry = !paymentOrQuota && attempt < limit;
+            if (shouldRetry) {
               const delayMs = rateLimited ? 30_000 * attempt : 0;
               console.log(
-                `${t.muted(tag)} ${t.warn(`! attempt ${attempt} failed${rateLimited ? " with rate limit/payment error" : ""}:`)} ${lastError} ${t.muted(`— retrying${delayMs ? ` in ${Math.round(delayMs / 1000)}s` : " once"}`)}`,
+                `${t.muted(tag)} ${t.warn(`! attempt ${attempt} failed${rateLimited ? " with rate limit" : ""}:`)} ${lastError} ${t.muted(`— retrying${delayMs ? ` in ${Math.round(delayMs / 1000)}s` : " once"}`)}`,
               );
               buf?.markRetried();
               if (delayMs > 0) await sleep(delayMs);
@@ -991,7 +1031,7 @@ async function runBatch(
         });
       } else {
         console.log(
-          `${t.muted(tag)} ${t.bad(sawRateLimit ? "✗ failed (after rate-limit retries):" : "✗ failed (after retry):")} ${lastError}`,
+          `${t.muted(tag)} ${t.bad(sawRateLimit ? "✗ failed (after rate-limit retries):" : "✗ failed:")} ${lastError}`,
         );
         if (buf) await buf.finalizeFailure(`Failed after retry: ${lastError}`);
         await setOutcome(myIdx, {

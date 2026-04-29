@@ -2,7 +2,12 @@ import { debugWarn } from "./debug";
 
 export function isRateLimitError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /(?:\b429\b|\b402\b|rate[-\s]?limit|too many requests|payment required|quota|insufficient credits|resource exhausted)/i.test(msg);
+  return /(?:\b429\b|rate[-\s]?limit|too many requests|resource exhausted)/i.test(msg);
+}
+
+export function isPaymentOrQuotaError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /(?:\b402\b|payment required|quota|insufficient credits|out of credits|billing)/i.test(msg);
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -25,9 +30,10 @@ export async function retryOnRateLimit<T>(
     try {
       return await fn();
     } catch (err) {
+      if (isPaymentOrQuotaError(err)) throw err;
       if (!isRateLimitError(err) || attempt >= attempts) throw err;
       const delay = baseDelayMs * attempt;
-      const msg = `${opts.label}: rate-limit/payment error on attempt ${attempt}/${attempts}; retrying in ${Math.round(delay / 1000)}s`;
+      const msg = `${opts.label}: rate limit on attempt ${attempt}/${attempts}; retrying in ${Math.round(delay / 1000)}s`;
       opts.onRetry?.(msg);
       debugWarn("RETRY", msg, err instanceof Error ? err.message : String(err));
       await sleep(delay);

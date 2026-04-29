@@ -47,11 +47,11 @@ export async function tryThrillshareBypass(
     for (const endpoint of extractDirectoryEndpoints(html)) endpoints.add(endpoint);
   }));
 
-  for (const endpoint of endpoints) {
-    const teachers = await scrapeDirectoryEndpoint(endpoint);
-    if (teachers.length === 0) continue;
-
-    log(`Thrillshare/Apptegy staff API matched ${teachers.length} teacher-like records`);
+  const teachers = dedupeTeachers((await Promise.all(
+    [...endpoints].map((endpoint) => scrapeDirectoryEndpoint(endpoint)),
+  )).flat());
+  if (teachers.length > 0) {
+    log(`Thrillshare/Apptegy staff API matched ${teachers.length} teacher-like records across ${endpoints.size} endpoint${endpoints.size === 1 ? "" : "s"}`);
     const siteInfo: RawSiteInfo = { name: null };
     return { teachers, siteInfo, sessionId: "thrillshare-bypass" };
   }
@@ -197,12 +197,14 @@ function isLikelyTeacher(role: string, department: string): boolean {
   const text = `${role} ${department}`.toLowerCase();
   if (!text.trim()) return false;
 
-  const teaches = /\b(teacher|instructor|faculty|educator|coach|interventionist|specialist|coordinator|chair)\b/.test(text)
+  const subjectSignal = /\b(math|mathematics|algebra|geometry|calculus|science|biology|chemistry|physics|english|language arts|social studies|history|art|music|band|choir|spanish|french|computer|technology|engineering|facs|physical education|pe)\b/.test(text);
+  const teaches = /\b(teacher|instructor|faculty|educator|interventionist)\b/.test(text)
+    || (/\b(coach|specialist|coordinator|chair)\b/.test(text) && subjectSignal)
     || /\b(pre-?k|kindergarten|\d+(?:st|nd|rd|th)?\s+grade)\b/.test(text)
-    || /\b(math|mathematics|algebra|geometry|calculus|science|biology|chemistry|physics|english|language arts|social studies|history|art|music|band|choir|spanish|french|computer|technology|engineering|facs|physical education|pe)\b/.test(text);
+    || subjectSignal;
   if (!teaches) return false;
 
-  const supportOnly = /\b(superintendent|principal|secretary|receptionist|clerk|bookkeeper|treasurer|payroll|custodian|maintenance|cafeteria|food service|transportation|bus driver|nurse|registrar|security|resource officer|technology director|communications|board member)\b/.test(text);
+  const supportOnly = /\b(superintendent|principal|assistant principal|vice principal|secretary|receptionist|clerk|bookkeeper|treasurer|payroll|custodian|maintenance|cafeteria|food service|transportation|bus driver|nurse|registrar|security|resource officer|technology director|athletic director|counselor|social worker|psychologist|therapist|librarian|media specialist|communications|board member)\b/.test(text);
   const explicitTeaching = /\b(teacher|instructor|faculty|educator|coach|classroom|special education|nursing instructor)\b/.test(text);
   return !supportOnly || explicitTeaching;
 }

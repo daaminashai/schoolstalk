@@ -313,7 +313,9 @@ export async function scrapeViaHasura(
   const byKey = new Map<string, BufferedTeacher>();
 
   for (const g of groupsRes.groups) {
+    if (isNonTeacherGroup(g.title)) continue;
     const subject = normalizeSubject(g.title);
+    if (!subject && !looksTeachingGroup(g.title)) continue;
     const schoolName = g.ownerOrganization?.title ?? "";
     for (const { person } of g.people) {
       if (!person) continue;
@@ -324,7 +326,7 @@ export async function scrapeViaHasura(
 
       const existing = byKey.get(key);
       if (existing) {
-        existing.subjects.add(subject);
+        if (subject) existing.subjects.add(subject);
         existing.rawGroupTitles.add(g.title);
         if (!existing.assignedSchool && schoolName) existing.assignedSchool = schoolName;
         continue;
@@ -336,7 +338,7 @@ export async function scrapeViaHasura(
         rawTitle: person.title?.trim() || undefined,
         phone: person.phone?.trim() || undefined,
         assignedSchool: schoolName || undefined,
-        subjects: new Set([subject]),
+        subjects: new Set(subject ? [subject] : []),
         rawGroupTitles: new Set([g.title]),
       });
     }
@@ -448,7 +450,19 @@ function normalizeSubject(groupTitle: string): string {
   if (/physic/.test(t)) return "Physics";
   if (/environ|earth|geolog|astronom/.test(t)) return "Science";
   if (/science/.test(t)) return "Science";
+  if (/english|language\s+arts|literature|reading|writing/.test(t)) return "English";
+  if (/social\s+studies|history|civics|government|economics/.test(t)) return "Social Studies";
+  if (/spanish|french|latin|german|world\s+language|foreign\s+language/.test(t)) return "World Language";
+  if (/art|visual\s+arts/.test(t)) return "Art";
+  if (/music|band|choir|orchestra/.test(t)) return "Music";
+  if (/physical\s+education|\bpe\b|health/.test(t)) return "Physical Education";
+  if (/special\s+education|sped/.test(t)) return "Special Education";
+  if (/kindergarten|pre-?k|\b\d+(?:st|nd|rd|th)?\s+grade\b/.test(t)) return "Elementary";
   return ""; // unknown/non-subject group — let validator/role inference handle
+}
+
+function looksTeachingGroup(groupTitle: string): boolean {
+  return /\b(teacher|faculty|instructor|classroom|intervention|specialist|coach|curriculum)\b/i.test(groupTitle);
 }
 
 /** when a teacher appears in multiple STEM groups, pick the most specific label */
@@ -456,6 +470,8 @@ function pickDeptLabel(subjects: Set<string>): string {
   const priority = [
     "Computer Science", "Engineering", "Physics", "Chemistry",
     "Biology", "Technology", "Mathematics", "Science", "STEM",
+    "English", "Social Studies", "World Language", "Art", "Music",
+    "Physical Education", "Special Education", "Elementary",
   ];
   for (const p of priority) if (subjects.has(p)) return p;
   return [...subjects][0] ?? "";
