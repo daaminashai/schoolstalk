@@ -895,6 +895,40 @@ async function runBatch(
 
   const outcomes: BatchOutcome[] = new Array(items.length);
   const existingSchoolCsvs = scanExistingSchoolCsvs();
+
+  if (!force) {
+    const reasons = new Map<string, number>();
+    let skipped = 0;
+    const start = Date.now();
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]!;
+      const skipReason = existingSkipReason(item, existingSchoolCsvs);
+      if (!skipReason) continue;
+
+      skipped++;
+      reasons.set(skipReason, (reasons.get(skipReason) ?? 0) + 1);
+      outcomes[i] = {
+        item,
+        status: "skipped",
+        durationMs: 0,
+      };
+    }
+
+    if (skipped > 0) {
+      const reasonSummary = [...reasons]
+        .map(([reason, count]) => `${count} ${reason}`)
+        .join(", ");
+      console.log(
+        t.muted(
+          `skipped ${skipped}/${items.length} already-complete school${skipped === 1 ? "" : "s"}${reasonSummary ? ` (${reasonSummary}; pass --force to re-scrape)` : ""}`,
+        ),
+      );
+      debug("BATCH", `bulk skipped ${skipped} existing outputs in ${Date.now() - start}ms`, Object.fromEntries(reasons));
+      await onUpdate?.(outcomes.slice());
+    }
+  }
+
   let cursor = 0;
 
   const setOutcome = async (idx: number, outcome: BatchOutcome) => {
@@ -906,6 +940,7 @@ async function runBatch(
     while (true) {
       const myIdx = cursor++;
       if (myIdx >= items.length) break;
+      if (outcomes[myIdx]) continue;
       const item = items[myIdx]!;
       const tag = `[${myIdx + 1}/${items.length} ${item.slug}]`;
       const start = Date.now();
@@ -1407,18 +1442,6 @@ function csvField(value: string | number | null | undefined): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-async function countTeachersInCsv(path: string): Promise<number> {
-  try {
-    const file = Bun.file(path);
-    if (!(await file.exists())) return 0;
-    const text = await file.text();
-    const rows = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
-    return Math.max(0, rows.length - 1);
-  } catch {
-    return 0;
-  }
-}
-
 async function writeStatusCsv(
   items: BatchItem[],
   outcomes: Array<BatchOutcome | undefined>,
@@ -1446,11 +1469,7 @@ async function writeStatusCsv(
     const outcome = byOutput.get(item.outputPath);
     const status = outcome?.status ?? "pending";
     const done = status === "ok" || status === "skipped" ? "yes" : "no";
-    const teacherCount = outcome?.result
-      ? outcome.result.teachers.length
-      : status === "skipped"
-        ? await countTeachersInCsv(item.outputPath)
-        : "";
+    const teacherCount = outcome?.result ? outcome.result.teachers.length : "";
     lines.push(
       [
         csvField(item.schoolName ?? item.slug),
