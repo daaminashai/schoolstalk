@@ -79,11 +79,17 @@ export class SlackNotifier {
 }
 
 export function createSlackFromEnv(): SlackNotifier | null {
-    const token = process.env.SLACK_BOT_TOKEN?.trim();
-    const channel = process.env.SLACK_CHANNEL_ID?.trim();
+    const token = slackEnvValue("SLACK_BOT_TOKEN");
+    const channel = slackEnvValue("SLACK_CHANNEL_ID");
     if (!token || !channel) return null;
-    const alertUserId = process.env.SLACK_ALERT_USER?.trim();
+    const alertUserId = slackEnvValue("SLACK_ALERT_USER") ?? undefined;
     return new SlackNotifier({ token, channel, alertUserId });
+}
+
+function slackEnvValue(name: string): string | null {
+    const value = process.env[name]?.trim();
+    if (!value || /^(something|changeme|todo|none|null)$/i.test(value)) return null;
+    return value;
 }
 
 // Aggregates per-school logs and posts a single concise Slack message

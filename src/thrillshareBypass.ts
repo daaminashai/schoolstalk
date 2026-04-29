@@ -165,7 +165,7 @@ async function scrapeDirectoryEndpoint(endpoint: string): Promise<RawTeacherData
     if (seenPages.has(nextUrl)) break;
     seenPages.add(nextUrl);
 
-    const data = await fetchJson<DirectoryResponse>(nextUrl);
+    const data: DirectoryResponse | null = await fetchJson<DirectoryResponse>(nextUrl);
     if (!data) break;
 
     const pageRows = data.directories ?? data.data ?? [];

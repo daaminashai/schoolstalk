@@ -57,7 +57,8 @@ const LOCAL_SCRIPT = resolve(
 );
 const DEFAULT_BROWSER_START_TIMEOUT_SECONDS = "120";
 const LOCAL_BROWSER_START_ATTEMPTS = 2;
-let localBrowserStartupQueue: Promise<void> = Promise.resolve();
+let activeLocalBrowserStartups = 0;
+const localBrowserStartupWaiters: Array<() => void> = [];
 
 /** create a local browser-use client. no cloud API key is used. */
 export function createClient(): BrowserClient {
@@ -82,7 +83,7 @@ export async function createSession(
   client: BrowserClient,
   _options?: { profileId?: string },
 ): Promise<SessionInfo> {
-  const session = await withSerializedLocalBrowserStartup(async () => {
+  const session = await withLocalBrowserStartupSlot(async () => {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= LOCAL_BROWSER_START_ATTEMPTS; attempt++) {
       const nextSession = new LocalBrowserSession();
@@ -108,19 +109,37 @@ function isBrowserStartupTimeout(err: unknown): boolean {
   return /Browser(Start|Launch|Connected)Event.*timed out|browser.*start.*timed out/i.test(message);
 }
 
-async function withSerializedLocalBrowserStartup<T>(fn: () => Promise<T>): Promise<T> {
-  const previous = localBrowserStartupQueue;
-  let release!: () => void;
-  localBrowserStartupQueue = new Promise<void>((resolveQueue) => {
-    release = resolveQueue;
-  });
-
-  await previous.catch(() => {});
+async function withLocalBrowserStartupSlot<T>(fn: () => Promise<T>): Promise<T> {
+  const release = await acquireLocalBrowserStartupSlot();
   try {
     return await fn();
   } finally {
     release();
   }
+}
+
+async function acquireLocalBrowserStartupSlot(): Promise<() => void> {
+  const limit = envInt("SCHOOLYANK_BROWSER_START_CONCURRENCY", 0, 0);
+  if (limit === 0) return () => {};
+
+  if (activeLocalBrowserStartups < limit) {
+    activeLocalBrowserStartups++;
+    return releaseLocalBrowserStartupSlot;
+  }
+
+  await new Promise<void>((resolveWaiter) => {
+    localBrowserStartupWaiters.push(resolveWaiter);
+  });
+  return releaseLocalBrowserStartupSlot;
+}
+
+function releaseLocalBrowserStartupSlot(): void {
+  const next = localBrowserStartupWaiters.shift();
+  if (next) {
+    next();
+    return;
+  }
+  activeLocalBrowserStartups = Math.max(0, activeLocalBrowserStartups - 1);
 }
 
 class LocalBrowserSession {
@@ -445,6 +464,13 @@ function pythonExecutable(): string {
   if (existsSync(projectVenvPython)) return projectVenvPython;
 
   return "python3";
+}
+
+function envInt(name: string, fallback: number, min = 1): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.max(min, Math.floor(n)) : fallback;
 }
 
 function browserStartTimeout(name: string): string {

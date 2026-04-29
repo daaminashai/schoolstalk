@@ -737,6 +737,59 @@ interface BatchOutcome {
   durationMs: number;
 }
 
+async function startBatchSlackThread(
+  slack: SlackNotifier | null,
+  items: BatchItem[],
+  concurrency: number,
+  label: string,
+  statusPath?: string,
+): Promise<string | null> {
+  if (!slack) return null;
+  const lines = [
+    `:hc: In Prod, Starting ${label}: ${items.length} school${items.length === 1 ? "" : "s"}`,
+    `Concurrency: ${concurrency}`,
+  ];
+  if (statusPath) lines.push(`Status CSV: ${statusPath}`);
+
+  const threadTs = await slack.startThread(lines.join("\n"));
+  if (!threadTs) {
+    console.log(
+      t.warn(
+        `! slack: unable to post batch message (${slack.getLastError() || "unknown error"}). Make sure the bot is invited and has chat:write.`,
+      ),
+    );
+  }
+  return threadTs;
+}
+
+async function finishBatchSlackThread(
+  slack: SlackNotifier | null,
+  threadTs: string | null,
+  outcomes: BatchOutcome[],
+  durationSec: string,
+): Promise<void> {
+  if (!slack || !threadTs) return;
+
+  const okOutcomes = outcomes.filter((o) => o.status === "ok");
+  const skipped = outcomes.filter((o) => o.status === "skipped").length;
+  const failed = outcomes.filter((o) => o.status === "failed");
+  const teachers = okOutcomes.reduce((sum, o) => sum + (o.result?.teachers.length ?? 0), 0);
+  const lines = [
+    failed.length > 0 ? `❌ Batch finished with failures` : `✅ Batch complete`,
+    `OK: *${okOutcomes.length}*`,
+    `Skipped: ${skipped}`,
+    `Failed: ${failed.length}`,
+    `Teachers: *${teachers}*`,
+    `Duration: ${durationSec}s`,
+  ];
+  for (const outcome of failed.slice(0, 10)) {
+    lines.push(`Failed: ${outcome.item.slug} - ${outcome.error ?? "unknown error"}`);
+  }
+  if (failed.length > 10) lines.push(`More failures: ${failed.length - 10}`);
+
+  await slack.postInThread(threadTs, lines.join("\n"));
+}
+
 interface ExistingSchoolCsvIndex {
   paths: Set<string>;
   byHsId: Map<string, string>;
@@ -1154,8 +1207,10 @@ async function runNonInteractive(flags: CliFlags): Promise<void> {
 
   const batchStart = Date.now();
   const slack = createSlackFromEnv();
+  const slackThread = await startBatchSlackThread(slack, items, flags.concurrency, "batch scrape");
   const outcomes = await runBatch(items, flags.concurrency, flags.force, slack);
   const batchDurationSec = ((Date.now() - batchStart) / 1000).toFixed(1);
+  await finishBatchSlackThread(slack, slackThread, outcomes, batchDurationSec);
 
   // merged CSV for batches of 2+ (or always when --merged-output is passed)
   const okOutcomes = outcomes.filter((o) => o.status === "ok" && o.result);
@@ -1556,6 +1611,7 @@ async function runFromSchoolsCsv(flags: CliFlags): Promise<void> {
 
   const batchStart = Date.now();
   const slack = createSlackFromEnv();
+  const slackThread = await startBatchSlackThread(slack, items, concurrency, "schools CSV scrape", statusPath);
   let statusWrite = Promise.resolve();
   const outcomes = await runBatch(
     items,
@@ -1572,6 +1628,7 @@ async function runFromSchoolsCsv(flags: CliFlags): Promise<void> {
   await statusWrite;
   await writeStatusCsv(items, outcomes, statusPath);
   const batchDurationSec = ((Date.now() - batchStart) / 1000).toFixed(1);
+  await finishBatchSlackThread(slack, slackThread, outcomes, batchDurationSec);
 
   // no merged output in CSV mode — per-city files only
 
