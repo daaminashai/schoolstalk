@@ -116,7 +116,7 @@ export async function createSession(
 
 function isBrowserStartupTimeout(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
-  return /Browser(Start|Launch|Connected)Event.*timed out|browser.*start.*timed out|connect\(\) timed out|CDP connection.*timed out/i.test(message);
+  return /Browser(Start|Launch|Connected)Event.*timed out|browser.*start.*timed out|connect\(\) timed out|CDP connection.*timed out|Failed to establish CDP connection|Failed to get session for initial target|Target .* not found.*detached/i.test(message);
 }
 
 async function withBrowserStartSlot<T>(fn: () => Promise<T>): Promise<T> {
