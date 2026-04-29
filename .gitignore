@@ -2,11 +2,10 @@
 node_modules
 .venv
 # output
+output
 out
 dist
-output/
 *.tgz
-schools
 .venv
 scripts/__pycache__
 # code coverage
