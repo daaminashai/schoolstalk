@@ -26,6 +26,8 @@ interface RunTaskOptions {
   onMessage?: (msg: string) => void;
   /** local model slot; resolved by the Python runner from env overrides */
   model?: BrowserModel;
+  /** fallback value for structured tasks when browser-use returns null */
+  emptyOnNull?: unknown;
 }
 
 interface BrowserClient {
@@ -53,6 +55,7 @@ const LOCAL_SCRIPT = resolve(
   "scripts",
   "local_browser_use_agent.py",
 );
+const DEFAULT_BROWSER_START_TIMEOUT_SECONDS = "30";
 let localBrowserStartupQueue: Promise<void> = Promise.resolve();
 
 /** create a local browser-use client. no cloud API key is used. */
@@ -132,9 +135,9 @@ class LocalBrowserSession {
       env: {
         ...process.env,
         SCHOOLYANK_BROWSER_SESSION_ID: this.id,
-        TIMEOUT_BrowserStartEvent: process.env.TIMEOUT_BrowserStartEvent || "90",
-        TIMEOUT_BrowserLaunchEvent: process.env.TIMEOUT_BrowserLaunchEvent || "90",
-        TIMEOUT_BrowserConnectedEvent: process.env.TIMEOUT_BrowserConnectedEvent || "90",
+        TIMEOUT_BrowserStartEvent: process.env.TIMEOUT_BrowserStartEvent || DEFAULT_BROWSER_START_TIMEOUT_SECONDS,
+        TIMEOUT_BrowserLaunchEvent: process.env.TIMEOUT_BrowserLaunchEvent || DEFAULT_BROWSER_START_TIMEOUT_SECONDS,
+        TIMEOUT_BrowserConnectedEvent: process.env.TIMEOUT_BrowserConnectedEvent || DEFAULT_BROWSER_START_TIMEOUT_SECONDS,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -338,14 +341,30 @@ export async function runTaskStructured<T extends z.ZodType>(
         onRetry: onMessage,
       },
     );
-    const parsed = schema.parse(output);
-    debug("BROWSER", `runTaskStructured done · ${((Date.now() - taskStart) / 1000).toFixed(2)}s`, parsed);
-    return parsed as z.output<T>;
+    const value = output == null && options.emptyOnNull !== undefined
+      ? options.emptyOnNull
+      : output;
+    const parsed = schema.safeParse(value);
+    if (!parsed.success) {
+      throw new Error(`structured browser output did not match schema: ${summarizeZodError(parsed.error)}`);
+    }
+    debug("BROWSER", `runTaskStructured done · ${((Date.now() - taskStart) / 1000).toFixed(2)}s`, parsed.data);
+    return parsed.data as z.output<T>;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     debug("BROWSER", `runTaskStructured FAILED · ${((Date.now() - taskStart) / 1000).toFixed(2)}s`, { error: message });
     throw new Error(`browser task failed: ${message}`);
   }
+}
+
+function summarizeZodError(error: z.ZodError): string {
+  return error.issues
+    .slice(0, 3)
+    .map((issue) => {
+      const path = issue.path.length > 0 ? issue.path.join(".") : "root";
+      return `${path}: ${issue.message}`;
+    })
+    .join("; ");
 }
 
 /** stop a local session and clean up resources */

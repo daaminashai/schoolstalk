@@ -236,12 +236,56 @@ def output_model(schema: dict[str, Any] | None) -> type[BaseModel] | None:
     return typ
 
 
+def empty_array_object_output(schema: dict[str, Any] | None) -> dict[str, list[Any]] | None:
+    """Return a safe empty object for schemas shaped like {items: [...]}."""
+
+    if not schema or schema.get("type") != "object":
+        return None
+    required = schema.get("required") or []
+    properties = schema.get("properties") or {}
+    if not required:
+        return None
+
+    out: dict[str, list[Any]] = {}
+    for prop in required:
+        prop_schema = properties.get(prop) or {}
+        if prop_schema.get("type") != "array":
+            return None
+        out[prop] = []
+    return out
+
+
+def parse_structured_json(raw: str) -> Any:
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2 and lines[-1].strip() == "```":
+            text = "\n".join(lines[1:-1]).strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        first_obj = text.find("{")
+        first_arr = text.find("[")
+        starts = [i for i in (first_obj, first_arr) if i >= 0]
+        if not starts:
+            raise
+        start = min(starts)
+        end = max(text.rfind("}"), text.rfind("]"))
+        if end <= start:
+            raise
+        return json.loads(text[start : end + 1])
+
+
 def parse_final_result(raw: str | None, schema: dict[str, Any] | None) -> Any:
-    if raw is None:
+    if raw is None or (schema and raw.strip() == ""):
+        empty = empty_array_object_output(schema)
+        if empty is not None:
+            return empty
         return None
     if not schema:
         return raw
-    return json.loads(raw)
+    return parse_structured_json(raw)
 
 
 async def run_task(browser: Browser, request: dict[str, Any]) -> None:

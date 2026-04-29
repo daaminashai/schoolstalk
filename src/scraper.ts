@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { debug } from "./debug";
 import type { RawTeacherData, RawSiteInfo } from "./types";
+import { tryThrillshareBypass } from "./thrillshareBypass";
 import {
   createClient,
   createSession,
@@ -101,6 +102,17 @@ export async function scrapeSchool(
 
   debug("SCRAPER", `scrapeSchool → ${schoolUrl}`);
 
+  options.onScraperPhase?.("extract");
+
+  const direct = await tryThrillshareBypass(schoolUrl, preferred, status);
+  if (direct) {
+    direct.siteInfo.name = direct.siteInfo.name ?? options.schoolName ?? null;
+    milestone(
+      `used Thrillshare/Apptegy API bypass (${direct.teachers.length} teacher candidate${direct.teachers.length === 1 ? "" : "s"})`,
+    );
+    return direct;
+  }
+
   const client = createClient();
   const session = await createSession(client);
   const { id: sessionId, liveUrl } = session;
@@ -120,7 +132,6 @@ export async function scrapeSchool(
       status("finding staff pages and extracting teachers...");
     }
 
-    options.onScraperPhase?.("extract");
     status("extracting teachers...");
 
     const candidates = (() => {
@@ -143,7 +154,7 @@ export async function scrapeSchool(
       sessionId,
       promptExtractTeachers(candidates),
       TeachersSchema,
-      { onMessage: options.onStatus, model: SCRAPER_MODEL_EXTRACT },
+      { onMessage: options.onStatus, model: SCRAPER_MODEL_EXTRACT, emptyOnNull: { teachers: [] } },
     );
     debug("SCRAPER", `extract raw result · ${extraction.teachers.length} teachers`, extraction);
 
@@ -155,7 +166,7 @@ export async function scrapeSchool(
         sessionId,
         promptExtractTeachers(),
         TeachersSchema,
-        { onMessage: options.onStatus, model: SCRAPER_MODEL_EXTRACT },
+        { onMessage: options.onStatus, model: SCRAPER_MODEL_EXTRACT, emptyOnNull: { teachers: [] } },
       );
       debug("SCRAPER", `extract (after fallback) · ${extraction.teachers.length} teachers`, extraction);
     }

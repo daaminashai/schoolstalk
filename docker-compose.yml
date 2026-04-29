@@ -12,7 +12,7 @@ services:
       timeout: 5s
       retries: 20
     ports:
-      - "5432:5432"
+      - "1278:1278"
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
@@ -20,14 +20,14 @@ services:
     build: .
     image: schoolyank:prod-ready
     pull_policy: build
-    command: [ "--schools-csv", "/app/input/schools_with_staff_urls.csv", "-j", "50" ]
+    command: [ "--schools-csv", "/app/input/schools_with_staff_urls.csv", "-j", "60" ]
     depends_on:
       postgres:
         condition: service_healthy
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgres://schoolyank:schoolyank@postgres:5432/schoolyank
+      DATABASE_URL: postgres://schoolyank:schoolyank@postgres:1278/schoolyank
       REQUIRE_DATABASE: "true"
       LOG_FILE: /app/logs/schoolyank.log
       STATUS_CSV_PATH: /app/output/status.csv
