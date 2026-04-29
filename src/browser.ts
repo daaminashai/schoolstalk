@@ -55,7 +55,8 @@ const LOCAL_SCRIPT = resolve(
   "scripts",
   "local_browser_use_agent.py",
 );
-const DEFAULT_BROWSER_START_TIMEOUT_SECONDS = "30";
+const DEFAULT_BROWSER_START_TIMEOUT_SECONDS = "120";
+const LOCAL_BROWSER_START_ATTEMPTS = 2;
 let localBrowserStartupQueue: Promise<void> = Promise.resolve();
 
 /** create a local browser-use client. no cloud API key is used. */
@@ -82,17 +83,29 @@ export async function createSession(
   _options?: { profileId?: string },
 ): Promise<SessionInfo> {
   const session = await withSerializedLocalBrowserStartup(async () => {
-    const nextSession = new LocalBrowserSession();
-    try {
-      await nextSession.ready;
-      return nextSession;
-    } catch (err) {
-      await nextSession.stop().catch(() => {});
-      throw err;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= LOCAL_BROWSER_START_ATTEMPTS; attempt++) {
+      const nextSession = new LocalBrowserSession();
+      try {
+        await nextSession.ready;
+        return nextSession;
+      } catch (err) {
+        lastErr = err;
+        await nextSession.stop().catch(() => {});
+        if (attempt === LOCAL_BROWSER_START_ATTEMPTS || !isBrowserStartupTimeout(err)) {
+          throw err;
+        }
+      }
     }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   });
   client.sessions.set(session.id, session);
   return { id: session.id, liveUrl: "" };
+}
+
+function isBrowserStartupTimeout(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /Browser(Start|Launch|Connected)Event.*timed out|browser.*start.*timed out/i.test(message);
 }
 
 async function withSerializedLocalBrowserStartup<T>(fn: () => Promise<T>): Promise<T> {
@@ -132,6 +145,7 @@ class LocalBrowserSession {
 
     this.proc = spawn(pythonExecutable(), [LOCAL_SCRIPT], {
       cwd: PROJECT_ROOT,
+      detached: process.platform !== "win32",
       env: {
         ...process.env,
         SCHOOLYANK_BROWSER_SESSION_ID: this.id,
@@ -178,21 +192,51 @@ class LocalBrowserSession {
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
-    try {
-      this.proc.stdin.write(`${JSON.stringify({ type: "stop" })}\n`);
-      this.proc.stdin.end();
-    } catch {}
 
     await new Promise<void>((resolveStop) => {
-      const timeout = setTimeout(() => {
-        if (!this.proc.killed) this.proc.kill("SIGTERM");
+      let sigtermTimeout: ReturnType<typeof setTimeout> | null = null;
+      let sigkillTimeout: ReturnType<typeof setTimeout> | null = null;
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (sigtermTimeout) clearTimeout(sigtermTimeout);
+        if (sigkillTimeout) clearTimeout(sigkillTimeout);
         resolveStop();
-      }, 5_000);
-      this.proc.once("exit", () => {
-        clearTimeout(timeout);
-        resolveStop();
-      });
+      };
+      this.proc.once("exit", finish);
+      if (this.proc.exitCode !== null || this.proc.signalCode !== null) {
+        finish();
+        return;
+      }
+      try {
+        this.proc.stdin.write(`${JSON.stringify({ type: "stop" })}\n`, () => {});
+        this.proc.stdin.end();
+      } catch {}
+      sigtermTimeout = setTimeout(() => {
+        this.killProcessTree("SIGTERM");
+        sigkillTimeout = setTimeout(() => {
+          this.killProcessTree("SIGKILL");
+          finish();
+        }, 5_000);
+      }, 20_000);
     });
+  }
+
+  private killProcessTree(signal: NodeJS.Signals): void {
+    const pid = this.proc.pid;
+    if (!pid) return;
+    try {
+      if (process.platform !== "win32") {
+        process.kill(-pid, signal);
+      } else {
+        this.proc.kill(signal);
+      }
+    } catch {
+      try {
+        this.proc.kill(signal);
+      } catch {}
+    }
   }
 
   private handleStdout(chunk: string): void {

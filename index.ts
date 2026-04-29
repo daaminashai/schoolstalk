@@ -11,8 +11,8 @@ dns.setDefaultResultOrder("ipv4first");
 
 import * as p from "@clack/prompts";
 import color from "picocolors";
-import { resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
+import { existsSync, readdirSync, type Dirent } from "node:fs";
 import { run, PHASE_LABELS, type PhaseId } from "./src/orchestrator";
 import { slugify } from "./src/utils";
 import { generateMergedCsv, writeCsv } from "./src/csv";
@@ -28,6 +28,7 @@ import type { ScrapeConfig, ScrapeResult, Teacher } from "./src/types";
 import os from "node:os";
 import { installFileLogger } from "./src/fileLogger";
 import { isRateLimitError, sleep } from "./src/retry";
+import { claim, describeOwner, installCleanupHandlers, release } from "./src/lock";
 
 installFileLogger();
 
@@ -716,6 +717,79 @@ interface BatchOutcome {
   durationMs: number;
 }
 
+interface ExistingSchoolCsvIndex {
+  paths: Set<string>;
+  byHsId: Map<string, string>;
+}
+
+function indexSchoolCsv(index: ExistingSchoolCsvIndex, filePath: string): void {
+  const fullPath = resolve(filePath);
+  index.paths.add(fullPath);
+
+  const name = basename(filePath);
+  const match = name.match(/^(.+)\.csv$/i);
+  if (match) index.byHsId.set(match[1]!, fullPath);
+}
+
+function scanExistingSchoolCsvs(root = resolve("schools")): ExistingSchoolCsvIndex {
+  const index: ExistingSchoolCsvIndex = { paths: new Set(), byHsId: new Map() };
+  const stack = [root];
+
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const filePath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(filePath);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".csv")) {
+        indexSchoolCsv(index, filePath);
+      }
+    }
+  }
+
+  return index;
+}
+
+function existingSkipReason(
+  item: BatchItem,
+  existingSchoolCsvs: ExistingSchoolCsvIndex,
+): string | null {
+  if (existsSync(item.outputPath)) {
+    return "output exists";
+  }
+  if (existingSchoolCsvs.paths.has(resolve(item.outputPath))) {
+    return "schools csv exists";
+  }
+  if (item.hsId != null && existingSchoolCsvs.byHsId.has(String(item.hsId))) {
+    return "schools csv exists for hsId";
+  }
+  return null;
+}
+
+function rememberSchoolCsv(
+  item: BatchItem,
+  existingSchoolCsvs: ExistingSchoolCsvIndex,
+): void {
+  indexSchoolCsv(existingSchoolCsvs, item.outputPath);
+}
+
+function claimSkipReason(item: BatchItem, force: boolean): string | null {
+  const claimed = claim(item.outputPath, force);
+  if (claimed.kind === "done") return "output exists";
+  if (claimed.kind === "in_progress") {
+    const owner = describeOwner(item.outputPath);
+    return owner ? `already in progress (${owner})` : "already in progress";
+  }
+  return null;
+}
+
 function defaultOutputPathFor(url: string): string {
   const domain = new URL(url).hostname.replace(/^www\./, "");
   return resolve("output", `${slugify(domain)}.csv`);
@@ -779,7 +853,10 @@ async function runBatch(
   slack?: SlackNotifier | null,
   onUpdate?: (outcomes: Array<BatchOutcome | undefined>) => Promise<void>,
 ): Promise<BatchOutcome[]> {
+  installCleanupHandlers();
+
   const outcomes: BatchOutcome[] = new Array(items.length);
+  const existingSchoolCsvs = scanExistingSchoolCsvs();
   let cursor = 0;
 
   const setOutcome = async (idx: number, outcome: BatchOutcome) => {
@@ -794,6 +871,33 @@ async function runBatch(
       const item = items[myIdx]!;
       const tag = `[${myIdx + 1}/${items.length} ${item.slug}]`;
       const start = Date.now();
+
+      const skipReason = force ? null : existingSkipReason(item, existingSchoolCsvs);
+      if (skipReason) {
+        console.log(
+          `${t.muted(tag)} ${t.muted(`skipped (${skipReason} — pass --force to re-scrape)`)}`,
+        );
+        await setOutcome(myIdx, {
+          item,
+          status: "skipped",
+          durationMs: Date.now() - start,
+        });
+        continue;
+      }
+
+      const claimReason = claimSkipReason(item, force);
+      if (claimReason) {
+        console.log(
+          `${t.muted(tag)} ${t.muted(`skipped (${claimReason} — pass --force to re-scrape)`)}`,
+        );
+        await setOutcome(myIdx, {
+          item,
+          status: "skipped",
+          durationMs: Date.now() - start,
+        });
+        continue;
+      }
+
       let threadTs: string | null = null;
       let buf: SlackThreadBuffer | null = null;
       if (slack) {
@@ -812,22 +916,6 @@ async function runBatch(
         }
       }
 
-      if (!force && existsSync(item.outputPath)) {
-        console.log(
-          `${t.muted(tag)} ${t.muted("skipped (output exists — pass --force to re-scrape)")}`,
-        );
-        if (threadTs)
-          slack
-            ?.postInThread(threadTs, `⏭️ Skipped (output exists).`)
-            .catch(() => {});
-        await setOutcome(myIdx, {
-          item,
-          status: "skipped",
-          durationMs: Date.now() - start,
-        });
-        continue;
-      }
-
       console.log(`${t.muted(tag)} ${t.bold("starting")} ${t.brand(item.url)}`);
       // avoid mid-run Slack noise; only final summaries will be sent
 
@@ -837,49 +925,54 @@ async function runBatch(
       let result: ScrapeResult | null = null;
       let lastError = "";
       let sawRateLimit = false;
-      for (let attempt = 1; attempt <= 5; attempt++) {
-        try {
-          const r = await scrapeOne(
-            item.url,
-            item.outputPath,
-            tag,
-            item.schoolName,
-            item.preferredDirectoryUrls,
-            item.hsId,
-            buf,
-          );
-          // treat 0 teachers as a retry-eligible failure — it's almost always
-          // a transient scraper gave-up / browser-use flake, not a real
-          // empty district. a real empty district is vanishingly rare.
-          if (r.teachers.length === 0 && attempt === 1) {
-            console.log(
-              `${t.muted(tag)} ${t.warn("! first attempt returned 0 teachers — retrying once")}`,
+      try {
+        for (let attempt = 1; attempt <= 5; attempt++) {
+          try {
+            const r = await scrapeOne(
+              item.url,
+              item.outputPath,
+              tag,
+              item.schoolName,
+              item.preferredDirectoryUrls,
+              item.hsId,
+              buf,
             );
-            buf?.markRetried();
-            lastError = "0 teachers on first attempt";
-            continue;
+            // treat 0 teachers as a retry-eligible failure — it's almost always
+            // a transient scraper gave-up / browser-use flake, not a real
+            // empty district. a real empty district is vanishingly rare.
+            if (r.teachers.length === 0 && attempt === 1) {
+              console.log(
+                `${t.muted(tag)} ${t.warn("! first attempt returned 0 teachers — retrying once")}`,
+              );
+              buf?.markRetried();
+              lastError = "0 teachers on first attempt";
+              continue;
+            }
+            result = r;
+            break;
+          } catch (err) {
+            lastError = err instanceof Error ? err.message : String(err);
+            const rateLimited = isRateLimitError(err);
+            sawRateLimit = sawRateLimit || rateLimited;
+            const shouldRetry = rateLimited || attempt === 1;
+            if (shouldRetry && attempt < 5) {
+              const delayMs = rateLimited ? 30_000 * attempt : 0;
+              console.log(
+                `${t.muted(tag)} ${t.warn(`! attempt ${attempt} failed${rateLimited ? " with rate limit/payment error" : ""}:`)} ${lastError} ${t.muted(`— retrying${delayMs ? ` in ${Math.round(delayMs / 1000)}s` : " once"}`)}`,
+              );
+              buf?.markRetried();
+              if (delayMs > 0) await sleep(delayMs);
+              continue;
+            }
+            break;
           }
-          result = r;
-          break;
-        } catch (err) {
-          lastError = err instanceof Error ? err.message : String(err);
-          const rateLimited = isRateLimitError(err);
-          sawRateLimit = sawRateLimit || rateLimited;
-          const shouldRetry = rateLimited || attempt === 1;
-          if (shouldRetry && attempt < 5) {
-            const delayMs = rateLimited ? 30_000 * attempt : 0;
-            console.log(
-              `${t.muted(tag)} ${t.warn(`! attempt ${attempt} failed${rateLimited ? " with rate limit/payment error" : ""}:`)} ${lastError} ${t.muted(`— retrying${delayMs ? ` in ${Math.round(delayMs / 1000)}s` : " once"}`)}`,
-            );
-            buf?.markRetried();
-            if (delayMs > 0) await sleep(delayMs);
-            continue;
-          }
-          break;
         }
+      } finally {
+        release(item.outputPath);
       }
 
       if (result) {
+        rememberSchoolCsv(item, existingSchoolCsvs);
         const dur = ((Date.now() - start) / 1000).toFixed(1);
         console.log(
           `${t.muted(tag)} ${t.ok("✓ done")} ${t.accent(String(result.teachers.length))} ${t.muted("teachers")} ${t.muted(`(${dur}s)`)}`,

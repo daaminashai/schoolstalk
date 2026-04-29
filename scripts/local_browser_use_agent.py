@@ -12,8 +12,11 @@ import asyncio
 import json
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Union
@@ -45,6 +48,7 @@ except Exception as exc:  # pragma: no cover - exercised only on missing deps
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-5-mini"
+DEFAULT_BROWSER_KILL_TIMEOUT_SECONDS = 10.0
 
 
 def env_bool(name: str) -> bool | None:
@@ -113,18 +117,18 @@ def make_llm(slot: str | None) -> ChatOpenRouter:
     )
 
 
-def isolated_user_data_dir(configured: str) -> tuple[str, str | None]:
+def isolated_user_data_dir(configured: str) -> tuple[str, str]:
     """Return a per-process profile dir so parallel Chromium launches never share one."""
 
+    session_id = env_str("SCHOOLYANK_BROWSER_SESSION_ID") or "local"
+    temp_root = Path(tempfile.mkdtemp(prefix=f"schoolyank-browser-{session_id}-"))
+
     if not configured:
-        return "", None
+        return str(temp_root), str(temp_root)
 
     configured_path = Path(configured).expanduser()
     if not configured_path.is_absolute():
         configured_path = Path.cwd() / configured_path
-
-    session_id = env_str("SCHOOLYANK_BROWSER_SESSION_ID") or "local"
-    temp_root = Path(tempfile.mkdtemp(prefix=f"schoolyank-browser-{session_id}-"))
 
     # Treat BROWSER_USE_USER_DATA_DIR as a template for single-session runs, but
     # never hand the same user-data-dir to two Chromium processes in parallel.
@@ -144,7 +148,7 @@ def isolated_user_data_dir(configured: str) -> tuple[str, str | None]:
     return str(temp_root), str(temp_root)
 
 
-def make_browser() -> tuple[Browser, str | None]:
+def make_browser() -> tuple[Browser, str]:
     kwargs: dict[str, Any] = {"keep_alive": True}
     headless = env_bool("BROWSER_USE_HEADLESS")
     if headless is None:
@@ -152,15 +156,79 @@ def make_browser() -> tuple[Browser, str | None]:
     if headless is not None:
         kwargs["headless"] = headless
 
-    user_data_dir = os.getenv("BROWSER_USE_USER_DATA_DIR")
-    if user_data_dir:
-        isolated_dir, cleanup_dir = isolated_user_data_dir(user_data_dir)
-        if isolated_dir:
-            kwargs["user_data_dir"] = isolated_dir
-    else:
-        cleanup_dir = None
+    isolated_dir, cleanup_dir = isolated_user_data_dir(os.getenv("BROWSER_USE_USER_DATA_DIR", ""))
+    kwargs["user_data_dir"] = isolated_dir
 
     return Browser(**kwargs), cleanup_dir
+
+
+def browser_kill_timeout() -> float:
+    raw = env_str("BROWSER_USE_KILL_TIMEOUT_SECONDS")
+    if not raw:
+        return DEFAULT_BROWSER_KILL_TIMEOUT_SECONDS
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return DEFAULT_BROWSER_KILL_TIMEOUT_SECONDS
+
+
+def browser_process_pids_using_path(path: str) -> list[int]:
+    if not path:
+        return []
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,command="],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return []
+
+    own_pid = os.getpid()
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == own_pid:
+            continue
+        command = parts[1]
+        lower = command.lower()
+        if path in command and ("chrom" in lower or "chrome" in lower):
+            pids.append(pid)
+    return pids
+
+
+def terminate_browser_processes_using_path(path: str) -> None:
+    pids = browser_process_pids_using_path(path)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if pids:
+        time.sleep(1)
+    hard_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+    for pid in browser_process_pids_using_path(path):
+        try:
+            os.kill(pid, hard_kill)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+async def close_browser(browser: Browser, cleanup_dir: str) -> None:
+    try:
+        await asyncio.wait_for(browser.kill(), timeout=browser_kill_timeout())
+    except Exception:
+        pass
+    terminate_browser_processes_using_path(cleanup_dir)
+    shutil.rmtree(cleanup_dir, ignore_errors=True)
 
 
 def model_name(prefix: str) -> str:
@@ -255,12 +323,17 @@ def empty_array_object_output(schema: dict[str, Any] | None) -> dict[str, list[A
     return out
 
 
-def parse_structured_json(raw: str) -> Any:
+def strip_json_fence(raw: str) -> str:
     text = raw.strip()
     if text.startswith("```"):
         lines = text.splitlines()
         if len(lines) >= 2 and lines[-1].strip() == "```":
             text = "\n".join(lines[1:-1]).strip()
+    return text
+
+
+def parse_structured_json(raw: str) -> Any:
+    text = strip_json_fence(raw)
 
     try:
         return json.loads(text)
@@ -278,14 +351,21 @@ def parse_structured_json(raw: str) -> Any:
 
 
 def parse_final_result(raw: str | None, schema: dict[str, Any] | None) -> Any:
-    if raw is None or (schema and raw.strip() == ""):
+    if raw is None:
         empty = empty_array_object_output(schema)
         if empty is not None:
             return empty
         return None
     if not schema:
         return raw
-    return parse_structured_json(raw)
+
+    text = strip_json_fence(raw)
+    if text == "":
+        empty = empty_array_object_output(schema)
+        if empty is not None:
+            return empty
+        return None
+    return parse_structured_json(text)
 
 
 async def run_task(browser: Browser, request: dict[str, Any]) -> None:
@@ -318,36 +398,31 @@ async def main() -> None:
         await browser.start()
     except Exception as exc:
         emit({"type": "error", "message": str(exc)})
-        if cleanup_dir:
-            shutil.rmtree(cleanup_dir, ignore_errors=True)
+        shutil.rmtree(cleanup_dir, ignore_errors=True)
         raise SystemExit(1)
 
-    emit({"type": "ready", "session_id": os.getenv("SCHOOLYANK_BROWSER_SESSION_ID", "local")})
-
-    loop = asyncio.get_running_loop()
-    while True:
-        line = await loop.run_in_executor(None, sys.stdin.readline)
-        if not line:
-            break
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError as exc:
-            emit({"type": "error", "message": f"invalid request json: {exc}"})
-            continue
-
-        if request.get("type") == "stop":
-            break
-        if request.get("type") != "run":
-            emit({"type": "error", "message": f"unknown request type: {request.get('type')}"})
-            continue
-        await run_task(browser, request)
-
     try:
-        await browser.kill()
-    except Exception:
-        pass
-    if cleanup_dir:
-        shutil.rmtree(cleanup_dir, ignore_errors=True)
+        emit({"type": "ready", "session_id": os.getenv("SCHOOLYANK_BROWSER_SESSION_ID", "local")})
+
+        loop = asyncio.get_running_loop()
+        while True:
+            line = await loop.run_in_executor(None, sys.stdin.readline)
+            if not line:
+                break
+            try:
+                request = json.loads(line)
+            except json.JSONDecodeError as exc:
+                emit({"type": "error", "message": f"invalid request json: {exc}"})
+                continue
+
+            if request.get("type") == "stop":
+                break
+            if request.get("type") != "run":
+                emit({"type": "error", "message": f"unknown request type: {request.get('type')}"})
+                continue
+            await run_task(browser, request)
+    finally:
+        await close_browser(browser, cleanup_dir)
 
 
 if __name__ == "__main__":
