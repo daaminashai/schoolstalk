@@ -280,13 +280,6 @@ function envInt(name: string, fallback: number, min = 1): number {
   return Number.isFinite(n) ? Math.max(min, Math.floor(n)) : fallback;
 }
 
-function effectiveConcurrency(requested: number): { value: number; capped: boolean; max: number } {
-  const max = envInt("SCHOOLYANK_MAX_CONCURRENCY", 32);
-  if (envBool("SCHOOLYANK_ALLOW_UNSAFE_CONCURRENCY")) return { value: requested, capped: false, max };
-  const value = Math.min(requested, max);
-  return { value, capped: value !== requested, max };
-}
-
 function scrapeAttemptLimit(rateLimited: boolean): number {
   return rateLimited
     ? envInt("SCHOOLYANK_MAX_RATE_LIMIT_ATTEMPTS", 2)
@@ -320,8 +313,8 @@ function printHelp(): void {
     `  ${t.brand("--schools-csv")} <path>   read schools from CSV (expects: Hs ID, Name, State, City, School Homepage, Primary URL, Candidate 1..3)`,
     `  ${t.brand("--output, -o")} <path>    single-url output csv path (default: output/<slug>.csv)`,
     `  ${t.brand("--merged-output")} <path> batch merged csv path (default: output/all.csv)`,
-    `  ${t.brand("--concurrency, -j")} <n>  parallel workers (capped by SCHOOLYANK_MAX_CONCURRENCY, default 32)`,
-    `  ${t.brand("--max")}                  ramp concurrency up (≈2× CPU, still capped)`,
+    `  ${t.brand("--concurrency, -j")} <n>  parallel workers`,
+    `  ${t.brand("--max")}                  ramp concurrency up (≈2× CPU)`,
     `  ${t.brand("--force")}                re-scrape even if output csv already exists`,
     `  ${t.brand("--interactive")}          force interactive prompt even when urls are passed`,
     `  ${t.brand("--debug")}                print extremely detailed debug info (browser agent, llm, nces, etc.)`,
@@ -927,17 +920,6 @@ async function runBatch(
   onUpdate?: (outcomes: Array<BatchOutcome | undefined>) => Promise<void>,
 ): Promise<BatchOutcome[]> {
   installCleanupHandlers();
-
-  const requestedConcurrency = concurrency;
-  const effective = effectiveConcurrency(requestedConcurrency);
-  concurrency = effective.value;
-  if (effective.capped) {
-    console.log(
-      t.warn(
-        `requested concurrency ${requestedConcurrency} capped to ${concurrency}; set SCHOOLYANK_MAX_CONCURRENCY or SCHOOLYANK_ALLOW_UNSAFE_CONCURRENCY=true to override`,
-      ),
-    );
-  }
 
   const slackThreadsEnabled = !!slack && (items.length <= 20 || envBool("SCHOOLYANK_BATCH_SLACK_THREADS"));
   if (slack && !slackThreadsEnabled) {

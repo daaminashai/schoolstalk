@@ -57,8 +57,6 @@ const LOCAL_SCRIPT = resolve(
 );
 const DEFAULT_BROWSER_START_TIMEOUT_SECONDS = "120";
 const LOCAL_BROWSER_START_ATTEMPTS = 2;
-let activeLocalBrowserStartups = 0;
-const localBrowserStartupWaiters: Array<() => void> = [];
 
 /** create a local browser-use client. no cloud API key is used. */
 export function createClient(): BrowserClient {
@@ -83,63 +81,27 @@ export async function createSession(
   client: BrowserClient,
   _options?: { profileId?: string },
 ): Promise<SessionInfo> {
-  const session = await withLocalBrowserStartupSlot(async () => {
-    let lastErr: unknown;
-    for (let attempt = 1; attempt <= LOCAL_BROWSER_START_ATTEMPTS; attempt++) {
-      const nextSession = new LocalBrowserSession();
-      try {
-        await nextSession.ready;
-        return nextSession;
-      } catch (err) {
-        lastErr = err;
-        await nextSession.stop().catch(() => {});
-        if (attempt === LOCAL_BROWSER_START_ATTEMPTS || !isBrowserStartupTimeout(err)) {
-          throw err;
-        }
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= LOCAL_BROWSER_START_ATTEMPTS; attempt++) {
+    const session = new LocalBrowserSession();
+    try {
+      await session.ready;
+      client.sessions.set(session.id, session);
+      return { id: session.id, liveUrl: "" };
+    } catch (err) {
+      lastErr = err;
+      await session.stop().catch(() => {});
+      if (attempt === LOCAL_BROWSER_START_ATTEMPTS || !isBrowserStartupTimeout(err)) {
+        throw err;
       }
     }
-    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
-  });
-  client.sessions.set(session.id, session);
-  return { id: session.id, liveUrl: "" };
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 function isBrowserStartupTimeout(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return /Browser(Start|Launch|Connected)Event.*timed out|browser.*start.*timed out/i.test(message);
-}
-
-async function withLocalBrowserStartupSlot<T>(fn: () => Promise<T>): Promise<T> {
-  const release = await acquireLocalBrowserStartupSlot();
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
-
-async function acquireLocalBrowserStartupSlot(): Promise<() => void> {
-  const limit = envInt("SCHOOLYANK_BROWSER_START_CONCURRENCY", 0, 0);
-  if (limit === 0) return () => {};
-
-  if (activeLocalBrowserStartups < limit) {
-    activeLocalBrowserStartups++;
-    return releaseLocalBrowserStartupSlot;
-  }
-
-  await new Promise<void>((resolveWaiter) => {
-    localBrowserStartupWaiters.push(resolveWaiter);
-  });
-  return releaseLocalBrowserStartupSlot;
-}
-
-function releaseLocalBrowserStartupSlot(): void {
-  const next = localBrowserStartupWaiters.shift();
-  if (next) {
-    next();
-    return;
-  }
-  activeLocalBrowserStartups = Math.max(0, activeLocalBrowserStartups - 1);
 }
 
 class LocalBrowserSession {
@@ -464,13 +426,6 @@ function pythonExecutable(): string {
   if (existsSync(projectVenvPython)) return projectVenvPython;
 
   return "python3";
-}
-
-function envInt(name: string, fallback: number, min = 1): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.max(min, Math.floor(n)) : fallback;
 }
 
 function browserStartTimeout(name: string): string {
