@@ -6,6 +6,13 @@
   "scripts": {
     "rank": "bun src/rank.ts",
     "preflight": "bun src/preflight.ts",
+    "normalize:teacher-states": "bun scripts/normalize_teacher_states.ts",
+    "fill:teacher-cities": "bun scripts/fill_teacher_cities_from_zip.ts",
+    "find:invalid-zips": "bun scripts/find_invalid_teacher_zips.ts",
+    "find:unwanted-roles": "bun scripts/find_unwanted_teacher_roles.ts",
+    "replace:unwanted-teachers": "bun scripts/replace_unwanted_teachers.ts",
+    "enrich:final-teacher-sources": "bun scripts/enrich_final_teacher_sources.ts",
+    "clean:teachers": "bun scripts/clean_teachers_with_openai.ts",
     "stats": "bun scripts/school_data_stats.ts",
     "typecheck": "bunx tsc --noEmit"
   },

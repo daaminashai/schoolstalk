@@ -3,7 +3,10 @@ node_modules
 .venv
 # output
 output
+dist
+csvs
 out
+schools
 *.tgz
 .venv
 scripts/__pycache__

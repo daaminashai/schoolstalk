@@ -1024,6 +1024,7 @@ function usage(): string {
     "",
     "Batch mode is the default: every schools/**/*.csv file is ranked and written to teachers/{state}/{city}/{hs_id}.top.csv.",
     "If --input points to a single CSV, only that file is ranked and --output controls the destination.",
+    "Use --dist-top N to export up to N ranked teachers per school to dist/teachers.csv.",
     "Progress is printed by default; --verbose adds teacher-level debug logs, and --quiet suppresses progress logs.",
   ].join("\n");
 }

@@ -46,4 +46,9 @@ the interactive mode (just `bun index.ts`) works great. but if you hate joy and 
 - some sites obfuscate emails. finalsite is handled but not other formats
 - Exa LinkedIn index is incomplete (10%-60% hit rate) and the free tier has only ~1k searches per mo
 
+## openai teacher csv cleaning
+`bun run clean:teachers:openai` validates `dist/teachers.csv` with OpenAI web search in 3-record batches and writes `dist/teachers.cleaned.csv`.
+
+Set `OPENAI_API_KEY` first. The script appends cleaned batches and resumes after rows already written to the output. Use `--limit 3 --dry-run` for a one-request test. It uses `gpt-4.1-mini` by default and runs 8 OpenAI requests concurrently; override with `--model`, `OPENAI_MODEL`, `--concurrency`, or `OPENAI_CONCURRENCY`.
+
 thats it, be free and go spam some teachers /j :)
