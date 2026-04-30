@@ -37,9 +37,9 @@ def main() -> int:
     parser.add_argument(
         "root",
         nargs="?",
-        default=Path.cwd() / "schools",
+        default=Path.cwd() / "teachers",
         type=Path,
-        help="Root directory to search (default: ./schools)",
+        help="Root directory to search (default: ./teachers)",
     )
     parser.add_argument(
         "--dry-run",

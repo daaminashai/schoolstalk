@@ -4,7 +4,6 @@ node_modules
 # output
 output
 out
-dist
 *.tgz
 .venv
 scripts/__pycache__
