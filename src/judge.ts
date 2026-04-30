@@ -37,9 +37,10 @@ For each teacher, decide TWO things:
      * Digital Learning Leaders, tech integrators, technology integrators (they teach digital skills)
      * Department chairs/heads of math/science/STEM departments
      * Anyone whose role combines a STEM subject with another subject (e.g. "Digital Learning Leader / STEM Teacher", "Literacy & Math Specialist")
-   - EXCLUDE:
-     * Pure non-STEM: librarians (unless "library technology integrator"), counselors, athletic coaches, food service, custodians, secretaries, bus drivers
-     * Political science, social science, library science, sports/exercise science (these SOUND like science but aren't)
+    - EXCLUDE:
+      * Pure non-STEM: librarians (unless "library technology integrator"), counselors, athletic coaches, food service, custodians, secretaries, bus drivers
+      * Physical Education / PE / Phys Ed — this is NOT physics
+      * Political science, social science, library science, sports/exercise science (these SOUND like science but aren't)
      * General elementary teachers with no STEM specialization in their title
      * Administrators with no subject-teaching role (principals, vice principals, superintendents, HR)
      * Educational assistants, paraprofessionals, instructional aides — unless their title explicitly names a STEM subject (e.g. "Math Interventionist" is STEM, "Educational Assistant" is not)
@@ -50,8 +51,8 @@ For each teacher, decide TWO things:
    - 5 = computer science, coding, software development, cybersecurity, web/app/game development, AP CS
    - 4 = engineering, robotics, maker spaces, digital fabrication, electronics, tech integration, IT, STEM (generic)
    - 3 = physics, applied science, CAD/drafting, woodshop, forensic science, astronomy
-   - 2 = chemistry, biology, environmental/earth/general science, anatomy
-   - 1 = math, statistics, or isStem=false
+   - 2 = math, statistics
+   - 1 = chemistry, biology, environmental/earth/general science, anatomy, or isStem=false
 
 Respond with valid JSON matching exactly:
 { "results": [ { "index": <int>, "isStem": <bool>, "hackerScore": 1|2|3|4|5 } ] }
@@ -181,6 +182,7 @@ async function judgeStemChunk(
 /** minimal keyword-based STEM check for chunk-level fallback */
 function keywordIsStem(t: TeacherJudgeInput): boolean {
   const txt = `${t.role} ${t.department ?? ""}`.toLowerCase();
+  if (/\b(?:physical\s+education|phys\s+ed|p\s*\/?\s*e|pe)\b/.test(txt)) return false;
   return /\b(math|science|stem|tech|comput|engineer|robot|physic|chem|biolog|coding|programming|digital)/.test(
     txt,
   );

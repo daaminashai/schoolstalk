@@ -39,19 +39,28 @@ export async function tryThrillshareBypass(
   const pageUrls = candidatePageUrls(schoolUrl, candidateUrls);
   const endpoints = new Set<string>();
 
-  await Promise.all(pageUrls.map(async (url) => {
-    if (isThrillshareDirectoryApi(url)) endpoints.add(url);
+  await Promise.all(
+    pageUrls.map(async (url) => {
+      if (isThrillshareDirectoryApi(url)) endpoints.add(url);
 
-    const html = await fetchText(url);
-    if (!html) return;
-    for (const endpoint of extractDirectoryEndpoints(html)) endpoints.add(endpoint);
-  }));
+      const html = await fetchText(url);
+      if (!html) return;
+      for (const endpoint of extractDirectoryEndpoints(html))
+        endpoints.add(endpoint);
+    }),
+  );
 
-  const teachers = dedupeTeachers((await Promise.all(
-    [...endpoints].map((endpoint) => scrapeDirectoryEndpoint(endpoint)),
-  )).flat());
+  const teachers = dedupeTeachers(
+    (
+      await Promise.all(
+        [...endpoints].map((endpoint) => scrapeDirectoryEndpoint(endpoint)),
+      )
+    ).flat(),
+  );
   if (teachers.length > 0) {
-    log(`Thrillshare/Apptegy staff API matched ${teachers.length} teacher-like records across ${endpoints.size} endpoint${endpoints.size === 1 ? "" : "s"}`);
+    log(
+      `Thrillshare/Apptegy staff API matched ${teachers.length} teacher-like records across ${endpoints.size} endpoint${endpoints.size === 1 ? "" : "s"}`,
+    );
     const siteInfo: RawSiteInfo = { name: null };
     return { teachers, siteInfo, sessionId: "thrillshare-bypass" };
   }
@@ -59,14 +68,19 @@ export async function tryThrillshareBypass(
   return null;
 }
 
-function candidatePageUrls(schoolUrl: string, candidateUrls: string[]): string[] {
+function candidatePageUrls(
+  schoolUrl: string,
+  candidateUrls: string[],
+): string[] {
   let origin = "";
   try {
     origin = new URL(schoolUrl).origin;
   } catch {}
 
   const urls = [
-    ...candidateUrls.filter((url) => isThrillshareDirectoryApi(url) || scoreLikelyStaffUrl(url) > 0),
+    ...candidateUrls.filter(
+      (url) => isThrillshareDirectoryApi(url) || scoreLikelyStaffUrl(url) > 0,
+    ),
     schoolUrl,
   ]
     .map((url) => normalizeUrl(url, origin))
@@ -92,7 +106,9 @@ function scoreLikelyStaffUrl(url: string): number {
 }
 
 function isThrillshareDirectoryApi(url: string): boolean {
-  return /thrillshare-cmsv2\.services\.thrillshare\.com\/api\/v\d+\/.*\/directories/i.test(url);
+  return /thrillshare-cmsv2\.services\.thrillshare\.com\/api\/v\d+\/.*\/directories/i.test(
+    url,
+  );
 }
 
 function extractDirectoryEndpoints(html: string): string[] {
@@ -120,7 +136,9 @@ function parseClientWorkState(html: string): unknown {
     } catch {}
   }
 
-  const objectMatch = html.match(/window\.clientWorkStateTemp\s*=\s*(\{.*?\})\s*;\s*<\/script>/s);
+  const objectMatch = html.match(
+    /window\.clientWorkStateTemp\s*=\s*(\{.*?\})\s*;\s*<\/script>/s,
+  );
   if (objectMatch) {
     try {
       return JSON.parse(objectMatch[1]!) as unknown;
@@ -143,7 +161,8 @@ function collectStaffLinks(value: unknown, endpoints: Set<string>): void {
   addEndpoint(staff?.main, endpoints);
   const sections = staff?.sections as Record<string, unknown> | undefined;
   if (sections) {
-    for (const endpoint of Object.values(sections)) addEndpoint(endpoint, endpoints);
+    for (const endpoint of Object.values(sections))
+      addEndpoint(endpoint, endpoints);
   }
 }
 
@@ -156,7 +175,9 @@ function cleanEndpoint(endpoint: string): string {
   return endpoint.replace(/&amp;/g, "&");
 }
 
-async function scrapeDirectoryEndpoint(endpoint: string): Promise<RawTeacherData[]> {
+async function scrapeDirectoryEndpoint(
+  endpoint: string,
+): Promise<RawTeacherData[]> {
   const rows: DirectoryRow[] = [];
   let nextUrl: string | null = endpoint;
   const seenPages = new Set<string>();
@@ -165,20 +186,27 @@ async function scrapeDirectoryEndpoint(endpoint: string): Promise<RawTeacherData
     if (seenPages.has(nextUrl)) break;
     seenPages.add(nextUrl);
 
-    const data: DirectoryResponse | null = await fetchJson<DirectoryResponse>(nextUrl);
+    const data: DirectoryResponse | null =
+      await fetchJson<DirectoryResponse>(nextUrl);
     if (!data) break;
 
     const pageRows = data.directories ?? data.data ?? [];
     rows.push(...pageRows);
 
-    nextUrl = data.meta?.links?.next ? cleanEndpoint(data.meta.links.next) : null;
+    nextUrl = data.meta?.links?.next
+      ? cleanEndpoint(data.meta.links.next)
+      : null;
   }
 
-  return dedupeTeachers(rows.map(rowToTeacher).filter((t): t is RawTeacherData => !!t));
+  return dedupeTeachers(
+    rows.map(rowToTeacher).filter((t): t is RawTeacherData => !!t),
+  );
 }
 
 function rowToTeacher(row: DirectoryRow): RawTeacherData | null {
-  const name = (row.full_name?.trim() || [row.first, row.last].filter(Boolean).join(" ").trim());
+  const name =
+    row.full_name?.trim() ||
+    [row.first, row.last].filter(Boolean).join(" ").trim();
   if (!name) return null;
 
   const role = row.title?.trim() || "";
@@ -197,21 +225,37 @@ function isLikelyTeacher(role: string, department: string): boolean {
   const text = `${role} ${department}`.toLowerCase();
   if (!text.trim()) return false;
 
-  const subjectSignal = /\b(math|mathematics|algebra|geometry|calculus|science|biology|chemistry|physics|english|language arts|social studies|history|art|music|band|choir|spanish|french|computer|technology|engineering|facs|physical education|pe)\b/.test(text);
-  const teaches = /\b(teacher|instructor|faculty|educator|interventionist)\b/.test(text)
-    || (/\b(coach|specialist|coordinator|chair)\b/.test(text) && subjectSignal)
-    || /\b(pre-?k|kindergarten|\d+(?:st|nd|rd|th)?\s+grade)\b/.test(text)
-    || subjectSignal;
+  const subjectSignal =
+    /\b(math|mathematics|algebra|geometry|calculus|science|biology|chemistry|physics|english|language arts|social studies|history|art|music|band|choir|spanish|french|computer|technology|engineering|facs|physical education|pe)\b/.test(
+      text,
+    );
+  const teaches =
+    /\b(teacher|instructor|faculty|educator|interventionist)\b/.test(text) ||
+    (/\b(coach|specialist|coordinator|chair)\b/.test(text) && subjectSignal) ||
+    /\b(pre-?k|kindergarten|\d+(?:st|nd|rd|th)?\s+grade)\b/.test(text) ||
+    subjectSignal;
   if (!teaches) return false;
 
-  const supportOnly = /\b(superintendent|principal|assistant principal|vice principal|secretary|receptionist|clerk|bookkeeper|treasurer|payroll|custodian|maintenance|cafeteria|food service|transportation|bus driver|nurse|registrar|security|resource officer|technology director|athletic director|counselor|social worker|psychologist|therapist|librarian|media specialist|communications|board member)\b/.test(text);
-  const explicitTeaching = /\b(teacher|instructor|faculty|educator|coach|classroom|special education|nursing instructor)\b/.test(text);
+  const supportOnly =
+    /\b(superintendent|principal|assistant principal|vice principal|secretary|receptionist|clerk|bookkeeper|treasurer|payroll|custodian|maintenance|cafeteria|food service|transportation|bus driver|nurse|registrar|security|resource officer|technology director|athletic director|counselor|social worker|psychologist|therapist|librarian|media specialist|communications|board member)\b/.test(
+      text,
+    );
+  const explicitTeaching =
+    /\b(teacher|instructor|faculty|educator|coach|classroom|special education|nursing instructor)\b/.test(
+      text,
+    );
   return !supportOnly || explicitTeaching;
 }
 
 function isSubjectDepartment(department: string): boolean {
-  return /\b(math|mathematics|science|biology|chemistry|physics|english|language arts|social studies|history|art|music|computer|technology|engineering|stem|facs|physical education|pe)\b/i.test(department)
-    && !/\b(certified|classified|staff|administration|preschool)\b/i.test(department);
+  return (
+    /\b(math|mathematics|science|biology|chemistry|physics|english|language arts|social studies|history|art|music|computer|technology|engineering|stem|facs|physical education|pe)\b/i.test(
+      department,
+    ) &&
+    !/\b(certified|classified|staff|administration|preschool)\b/i.test(
+      department,
+    )
+  );
 }
 
 async function fetchText(url: string): Promise<string | null> {

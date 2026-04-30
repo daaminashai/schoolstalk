@@ -116,6 +116,12 @@ export function canonicalizeDepartment(raw: string | null | undefined): string |
     "physics": "Physics",
     "ap physics": "Physics",
 
+    "pe": "Physical Education",
+    "p e": "Physical Education",
+    "p/e": "Physical Education",
+    "phys ed": "Physical Education",
+    "physical education": "Physical Education",
+
     "earth science": "Earth Science",
     "environmental science": "Environmental Science",
     "apes": "Environmental Science",
@@ -160,6 +166,8 @@ export function canonicalizeDepartment(raw: string | null | undefined): string |
   if (/\b(robotic)/.test(lower)) return "Robotics";
   if (/\b(steam)\b/.test(lower)) return "STEAM";
   if (/\b(stem)\b/.test(lower)) return "STEM";
+  // Physical Education is PE, not Physics. Guard before the broad physic* match.
+  if (/\b(physical\s+education|phys\s+ed|p\s*\/\s*e|pe)\b/.test(lower)) return "Physical Education";
   if (/\b(physic)/.test(lower)) return "Physics";
   if (/\b(chem)/.test(lower)) return "Chemistry";
   if (/\b(biolog|anatomy|physiology|life science)/.test(lower)) return "Biology";

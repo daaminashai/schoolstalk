@@ -38,11 +38,14 @@ const STEM_KEYWORDS = [...TECH_KEYWORDS, ...SCIENCE_KEYWORDS, ...MATH_KEYWORDS];
 const GENERIC_DEPT_LABELS = new Set(["Science", "STEM", "Technology"]);
 
 const FALSE_POSITIVE_PATTERNS = [
+  /\b(?:physical\s+education|phys\s+ed|p\s*\/?\s*e|pe)\b/i,
   /\bpolitical\s+science\b/i,
   /\bsocial\s+science\b/i,
   /\blibrary\s+science\b/i,
   /\bexercise\s+science\b/i,
   /\bsports?\s+science\b/i,
+  /\bhealth\s+science\b/i,
+  /\bfamily\s+(?:and|&)\s+consumer\s+science\b/i,
   /\bscience\s+of\b(?!\s+(?:physics|chemistry|biology|engineering|computing|mathematics))/i,
   /\baftermath\b/i,
 ];
@@ -448,9 +451,25 @@ const HACKER_TIERS: { score: HackerScore; patterns: RegExp[] }[] = [
       /\bastronomy\b/i,
     ],
   },
-  // tier 2: life + earth sciences — STEM but lab-coat, not hacker
+  // tier 2: math — STEM, but less directly hacker/project-building aligned
   {
     score: 2,
+    patterns: [
+      /\bmath(?:ematics)?\b/i,
+      /\balgebra\b/i,
+      /\bgeometry\b/i,
+      /\bcalculus\b/i,
+      /\bpre\s*-?calculus\b/i,
+      /\bprecalc\b/i,
+      /\btrigonometry\b/i,
+      /\btrig\b/i,
+      /\bstatistics\b/i,
+      /\bprobability\b/i,
+    ],
+  },
+  // tier 1: life + earth sciences — STEM, but lowest priority for this ranker
+  {
+    score: 1,
     patterns: [
       /\bchemistry\b/i,
       /\bbiology\b/i,
@@ -472,7 +491,7 @@ const HACKER_TIERS: { score: HackerScore; patterns: RegExp[] }[] = [
 /**
  * compute a 1-5 Hack Club affinity score from a teacher's role + department.
  * CS/coding/software = 5, engineering/robotics/maker = 4, physics/applied = 3,
- * chem/bio/env = 2, math and everything else = 1.
+ * math = 2, chem/bio/env/general science = 1.
  */
 export function computeHackerScore(
   role: string,
@@ -480,12 +499,13 @@ export function computeHackerScore(
 ): HackerScore {
   const text = [role, department].filter(Boolean).join(" ");
   if (!text.trim()) return 1;
+  if (/\b(?:physical\s+education|phys\s+ed|p\s*\/?\s*e|pe)\b/i.test(text)) return 1;
 
   for (const tier of HACKER_TIERS) {
     if (tier.patterns.some((p) => p.test(text))) return tier.score;
   }
-  // default tier 1: math and anything else that passed the STEM filter but
-  // doesn't match a more hacker-flavored keyword.
+  // default tier 1: anything that passed the STEM filter but doesn't match a
+  // more hacker-flavored keyword.
   return 1;
 }
 
