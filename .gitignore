@@ -8,6 +8,7 @@ csvs
 out
 schools
 *.tgz
+teachers
 dist
 .venv
 scripts/__pycache__
