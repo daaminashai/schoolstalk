@@ -1,7 +1,15 @@
-# schoolyank
+<p align="center">
+  <img width="1000" alt="banner" src="https://github.com/user-attachments/assets/777ead5d-9c61-41f2-80ee-09d22c6a8810" /></p>
+</p>
+<h1 align="center" style="font-size: 52px; font-family: 'system-ui';"> schoolstalk </h1>
+<p align="center">
+ <img src ="https://img.shields.io/badge/license-MIT-blue">
+ <img src ="https://img.shields.io/badge/version-1.0.0-green.svg">
+ <img src="https://img.shields.io/github/stars/daaminashai/schoolstalk?style=social?color" alt="GitHub Stars">
+ <img src ="https://hackatime-badge.hackclub.com/U07GLQY6UN4/schoolstalk?color=red&label=Time%20Spent">
+</p>
 
-mega-scraping script to retrieve 600k+ teachers and ranking them based on hacker compatibility. 
-it goes from a school's website -> all teachers.
+mega-scraping script to retrieve 600k+ teachers and ranking them based on hacker compatibility. goes from a school's website -> all teachers.
 
 to get started:
 
