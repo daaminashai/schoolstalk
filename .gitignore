@@ -8,6 +8,7 @@ csvs
 out
 schools
 *.tgz
+dist
 .venv
 scripts/__pycache__
 # code coverage
