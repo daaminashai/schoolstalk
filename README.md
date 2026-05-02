@@ -6,7 +6,7 @@
  <img src ="https://img.shields.io/badge/license-MIT-blue">
  <img src ="https://img.shields.io/badge/version-1.0.0-green.svg">
  <img src="https://img.shields.io/github/stars/daaminashai/schoolstalk?style=social?color" alt="GitHub Stars">
- <img src ="https://hackatime-badge.hackclub.com/U07GLQY6UN4/schoolstalk?color=red&label=Time%20Spent">
+ <img src ="https://hackatime-badge.hackclub.com/U07GLQY6UN4/schoolstalk?color=red&label=Time%20Spent&aliases=schoolyank,school-stalker,schoolstalk-personal">
 </p>
 
 mega-scraping script to retrieve 600k+ teachers and ranking them based on hacker compatibility. goes from a school's website -> all teachers.
