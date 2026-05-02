@@ -94,3 +94,8 @@ minimal requirement: an OpenRouter key.
 - python helpers live in `scripts/` for bulk csv surgery if you enjoy command-line archaeology
 
 thats it. go spam some teachers!! (legally) and send them something nice.
+
+
+## credits
+this is a vastly improved version of https://github.com/Hex-4/schoolyank by [@Hex-4](http://github.com/hex-4/)
+thank you for the direction!
