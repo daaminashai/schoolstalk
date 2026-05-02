@@ -1,54 +1,88 @@
 # schoolyank
 
-vibe coded script to extract stem teacher data from a school URL.
-
-this got very complicated, very fast. shoutout to claude code and the ollama free tier. sort by hacker_score descending in the CSV for high-value targets.
+mega-scraping script to retrieve 600k+ teachers and ranking them based on hacker compatibility. 
+it goes from a school's website -> all teachers.
 
 to get started:
 
 ```bash
-git clone https://github.com/Hex-4/schoolyank
+git clone <this repo> schoolyank
+cd schoolyank
+bun install
 python3 -m pip install -r requirements.txt
 browser-use install
-bun index.ts # if .env doesn't exist, runs setup first
+cp .env.example .env
+bun index.ts --preflight
+bun index.ts
 ```
 
-make sure you have an OpenRouter key ready. the setup script will configure OpenRouter, and then use it to autonomously sign up for Browser Use (via the agent-specific challenge-response flow) and the Exa search API (via a browser use agent). Keys are saved to .env automatically.
+first run launches an interactive setup wizard: you paste an openrouter key, pick a model, optionally let it spin up an exa account in a disposable browser, then it drops the keys into .env and kicks off the scrape.
 
-script does this:
-- spins up a local browser use agent to figure out if the site is a district or a single school
-- the agent traverses staff directories and lists stem teachers
-- claude wrote a ton of smart code that validates and normalizes what the agent returned
-- sends validated listing to an OpenRouter-backed LLM judge - the judge strips non-stem teachers that slipped in and assigns a hacker score to teachers (CS, robotics, etc get high scores, math and etc get lower scores)
-- attempts to validate emails (doesn't work on many home networks)
-- hits the NCES government database to get better addresses
-- uses Exa's people search vertical to get linkedin URLs and better job titles for teachers
-- exports to csv
-whole pipeline takes ~3min for a 50-teacher district. main slowdown is the browser use agent.
+what it does:
+- checks for apptegy/finalsite shortcuts first (hasura + thrillshare) before spending tokens on the agent
+- spins up the local browser-use runner with a structured prompt to crawl staff directories, tabs, filters, pdf links, whatever it takes
+- normalizes the agent output (name parsing, email cleanup, dedupe, role scrub, email pattern inference) without dropping non-stem teachers anymore
+- resolves the school in the urban institute nces api for verified addresses + phone numbers and logs why if the match fails
+- pings dns mx + smtp rcpt to for every email; nukes addresses the server rejects, keeps inconclusive ones untouched
+- writes clean csvs to `output/` and, in batch mode, a merged `output/all.csv`
+- pushes rows into postgres when `DATABASE_URL` is set so downstream jobs can keep going even if the cli dies
+- streams the play-by-play into slack if `SLACK_BOT_TOKEN` + `SLACK_CHANNEL_ID` show up so you can watch the chaos from your phone
 
 ## usage
-the interactive mode (just `bun index.ts`) works great. but if you hate joy and pretty colors, run with flags instead:
-- `--url https://example.com` for one url. `--urls-file schools.txt` reads schools one-per-line, ignoring lines that start with #.
-- `--schools-csv schools_with_staff_urls.csv` reads everything from that one CSV. Required columns: `Hs ID`, `Name`, `State`, `City`, and `School Homepage`.
-- Staff URL hints come from the same row: `Primary URL`, `Candidate 1`, `Candidate 1 Score`, `Candidate 2`, `Candidate 2 Score`, `Candidate 3`, `Candidate 3 Score`, and optional `Verified URL`.
-- `--output` or `-o` to change the filename for one-school mode. `--merged-output` merges all results from running on multiple schools into one CSV.
-- `--linkedin` to enable linkedin enrichment. recommended.
-- `-j <n>` to adjust concurrency in batch mode. each job launches a local browser, so tune this for your machine.
-- `--force` to overwrite previous CSVs
-- `--debug` dumps detailed information, useful to debug flaky or weird sites
+
+interactive mode (`bun index.ts`) is the guided flow: asks for one url and prints output.
+
+- `--url https://example.com` scrape one site with no prompts (repeatable)
+- bare positional urls work too: `bun index.ts https://a.edu https://b.org`
+- `--urls-file urls.txt` load one url per line (lines starting with `#` ignored)
+- shorthand `@schools_with_staff_urls.csv` is the same as `--schools-csv`
+- `--output path.csv` choose the filename when you pass exactly one url
+- `--merged-output batch.csv` override the merged csv path (default `output/all.csv`)
+- `--concurrency N` / `-j N` adjust parallel browsers (default 6); `--max` doubles cores up to `SCHOOLYANK_MAX_CONCURRENCY`
+- `--force` re-scrape even if the csv already exists or another worker claimed it
+- `--interactive` force the cute cli even when you provided urls
+- `--debug` firehose every agent/nces/email log line to stderr
+- `--preflight` run environment + dependency checks and exit (same as `bun index.ts --preflight`)
+- every batch run writes progress to `output/status.csv` (set `STATUS_CSV_PATH` to move it)
+
+## env + config
+
+minimal requirement: an OpenRouter key.
+
+- `OPENROUTER_API_KEY` (required) + optionally `AI_MODEL`, `AI_BASE_URL`
+- `EXA_API_KEY` (optional) powers the ranking/enrichment scripts; the main scrape currently runs without it and falls back to DDG when those scripts need web search
+- `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID`, `SLACK_ALERT_USER` (optional) enable slack threading + error pings
+- `DATABASE_URL` (optional) turns on the postgres sink; set `REQUIRE_DATABASE=true` if csv-only mode should hard fail
+- concurrency and startup knobs live behind envs: `SCHOOLYANK_MAX_CONCURRENCY`, `SCHOOLYANK_MAX_SCRAPE_ATTEMPTS`, `SCHOOLYANK_MAX_RATE_LIMIT_ATTEMPTS`, `SCHOOLYANK_BROWSER_START_*`
+- logging: set `LOG_FILE` to capture a rolling log, `STATUS_CSV_PATH` to relocate the status tracker
+- docker compose uses the same envs; `docker-compose up` brings up postgres + the scraper worker if you like running this in a box
+
+## outputs
+
+- default per-school csv: `output/<slugified-domain>.csv`
+- schools csv mode writes to `schools/<STATE>/<city>/<Hs ID>.csv` so nothing collides
+- merged batch csv lands at `output/all.csv` unless you override it
+- status tracker lives at `output/status.csv` (per run)
+- when postgres is configured the upsert target is `public.extracted_teachers`
+- log files go wherever `LOG_FILE` says; otherwise stdout/stderr is all you get
 
 ## limitations
-- sites that don't expose staff emails -> blank column. the script can infer email formats if given >3 seeds, but can't if the site itself only exposes, say, a contact form
-- smtp validation doesn't work on most home networks since port 25 is blocked
-- federated districts (with per-school subsites and no combined directory) have limited coverage (10-50%)
-- amount of found teachers can vary by like 5% each run and i cant fix it sowwy :(
-- doesn't work on reCAPTCHAd sites or login-walled sites
-- some sites obfuscate emails. finalsite is handled but not other formats
-- Exa LinkedIn index is incomplete (10%-60% hit rate) and the free tier has only ~1k searches per mo
 
-## openai teacher csv cleaning
-`bun run clean:teachers:openai` validates `dist/teachers.csv` with OpenAI web search in 3-record batches and writes `dist/teachers.cleaned.csv`.
+- no staff directory → no teachers; portals that hide everything behind a parent login still beat the agent
+- smtp validation needs port 25 — most home ISPs block it, so expect “inconclusive” spam in that case
+- captchas, sso walls, and “enter your student id” forms still end the ride
+- directories that obfuscate emails with weirdo javascript (other than finalsite) require manual cleanup
+- output counts can wobble by a few teachers run-to-run because the agent explores in a slightly different order every time
+- long-running batches should stay under whatever your computer can cool; `--max` will happily light all cores
 
-Set `OPENAI_API_KEY` first. The script appends cleaned batches and resumes after rows already written to the output. Use `--limit 3 --dry-run` for a one-request test. It uses `gpt-4.1-mini` by default and runs 8 OpenAI requests concurrently; override with `--model`, `OPENAI_MODEL`, `--concurrency`, or `OPENAI_CONCURRENCY`.
+## side quests
 
-thats it, be free and go spam some teachers /j :)
+- `bun index.ts --help` prints the full flag bible with prettier formatting
+- `bun run preflight` standalone env check (same as the `--preflight` flag)
+- `bun run stats` quick aggregate counts over everything in `schools/`
+- `bun run clean:teachers` re-validates `dist/teachers.csv` in chunks with OpenAI web search (set `OPENAI_API_KEY` first)
+- `bun run rank` scores teachers out of 100, pulls web presence (Exa/DDG), and emits ranked csvs per school
+- `bun run typecheck` keeps the bun + typescript types honest
+- python helpers live in `scripts/` for bulk csv surgery if you enjoy command-line archaeology
+
+thats it. go spam some teachers!! (legally) and send them something nice.
